@@ -14,6 +14,7 @@ class MockPublicAPI:
         self.translations = {
             "prompt_empty_search": "Type to search bookmarks, or paste a URL to save..."
         }
+        self.copied_params = []
 
     async def get_setting(self, ctx: Context, key: str) -> str:
         return self.settings.get(key, "")
@@ -26,6 +27,9 @@ class MockPublicAPI:
 
     async def get_translation(self, ctx: Context, key: str) -> str:
         return self.translations.get(key, key)
+
+    async def copy(self, ctx: Context, params) -> None:
+        self.copied_params.append(params)
 
 
 def extract_header_metadata(plugin_file_path: Path) -> dict:
@@ -112,6 +116,16 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("setting_api_token_label", i18n[lang])
             self.assertIn("setting_max_results_label", i18n[lang])
             self.assertIn("prompt_empty_search", i18n[lang])
+            self.assertIn("action_open_url", i18n[lang])
+            self.assertIn("action_copy_url", i18n[lang])
+            self.assertIn("action_open_in_linkding", i18n[lang])
+            self.assertIn("no_bookmarks_found", i18n[lang])
+            self.assertIn("no_bookmarks_found_sub", i18n[lang])
+            self.assertIn("error_auth_failed", i18n[lang])
+            self.assertIn("error_auth_failed_sub", i18n[lang])
+            self.assertIn("error_network", i18n[lang])
+            self.assertIn("error_timeout", i18n[lang])
+            self.assertIn("error_timeout_sub", i18n[lang])
 
 
 class TestPluginLifecycle(unittest.IsolatedAsyncioTestCase):
@@ -228,5 +242,222 @@ class TestPluginQuery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.icon.image_type, WoxImageType.SVG)
 
 
+class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+        from unittest.mock import patch
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+
+        self.mock_api = MockPublicAPI(initial_settings={
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+            "max_results": "10",
+        })
+        self.ctx = Context()
+        params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
+        await self.plugin.init(self.ctx, params)
+
+    def _make_query(self, search: str) -> Query:
+        return Query(
+            id="q_test",
+            type=QueryType.INPUT,
+            raw_query=f"ld {search}",
+            selection=Selection(),
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search=search,
+        )
+
+    async def test_routing_ignores_url_and_tag(self):
+        # Queries matching URL pattern or # tag prefix should not trigger bookmark search
+        from unittest.mock import patch
+
+        with patch.object(self.plugin, "_search_bookmarks") as mock_search:
+            res1 = await self.plugin.query(self.ctx, self._make_query("https://example.com/page"))
+            self.assertEqual(res1.results, [])
+
+            res2 = await self.plugin.query(self.ctx, self._make_query("http://insecure.org"))
+            self.assertEqual(res2.results, [])
+
+            res3 = await self.plugin.query(self.ctx, self._make_query("#python"))
+            self.assertEqual(res3.results, [])
+
+            mock_search.assert_not_called()
+
+    async def test_search_normal_results_and_formatting(self):
+        from unittest.mock import patch, MagicMock
+        import io
+
+        mock_response_data = {
+            "count": 2,
+            "results": [
+                {
+                    "id": 1,
+                    "url": "https://python.org",
+                    "title": "Python Programming",
+                    "website_title": "Welcome to Python.org",
+                    "tag_names": ["python", "dev"],
+                },
+                {
+                    "id": 2,
+                    "url": "https://github.com",
+                    "title": "",
+                    "website_title": "GitHub Homepage",
+                    "tag_names": [],
+                },
+            ],
+        }
+
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, self._make_query("python"))
+
+            self.assertEqual(len(response.results), 2)
+
+            # Check HTTP request call details
+            self.assertEqual(mock_urlopen.call_count, 1)
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("https://linkding.example.com/api/bookmarks/?q=python&limit=10", req.full_url)
+            self.assertEqual(req.headers.get("Authorization"), "Token secret_token")
+            self.assertEqual(req.headers.get("Accept"), "application/json")
+
+            # Check result 1 formatting
+            r1 = response.results[0]
+            self.assertEqual(r1.title, "Python Programming")
+            self.assertEqual(r1.sub_title, "https://python.org · #python #dev")
+            self.assertEqual(r1.icon.image_type, WoxImageType.SVG)
+            self.assertEqual(len(r1.actions), 3)
+
+            # Check actions on result 1
+            act_default = r1.actions[0]
+            self.assertTrue(act_default.is_default)
+            self.assertEqual(act_default.name, "i18n:action_open_url")
+
+            act_copy = r1.actions[1]
+            self.assertFalse(act_copy.is_default)
+            self.assertEqual(act_copy.name, "i18n:action_copy_url")
+
+            act_linkding = r1.actions[2]
+            self.assertFalse(act_linkding.is_default)
+            self.assertEqual(act_linkding.name, "i18n:action_open_in_linkding")
+
+            # Check result 2 formatting (fallback to website_title when title is empty, no tags)
+            r2 = response.results[1]
+            self.assertEqual(r2.title, "GitHub Homepage")
+            self.assertEqual(r2.sub_title, "https://github.com")
+
+    async def test_search_actions_dispatch(self):
+        from unittest.mock import patch, MagicMock
+        from wox_plugin import ActionContext
+
+        mock_response_data = {
+            "count": 1,
+            "results": [
+                {
+                    "id": 1,
+                    "url": "https://python.org",
+                    "title": "Python Programming",
+                    "tag_names": ["python"],
+                }
+            ],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(self.ctx, self._make_query("python"))
+            result = response.results[0]
+
+            act_open = result.actions[0]
+            act_copy = result.actions[1]
+            act_web = result.actions[2]
+
+            with patch("webbrowser.open") as mock_browser_open:
+                # Test default open action
+                await act_open.action(self.ctx, ActionContext())
+                mock_browser_open.assert_called_once_with("https://python.org")
+
+            # Test copy action
+            await act_copy.action(self.ctx, ActionContext())
+            self.assertEqual(len(self.mock_api.copied_params), 1)
+            self.assertEqual(self.mock_api.copied_params[0].text, "https://python.org")
+
+            with patch("webbrowser.open") as mock_browser_open:
+                # Test open in linkding web action
+                await act_web.action(self.ctx, ActionContext())
+                mock_browser_open.assert_called_once_with("https://linkding.example.com/bookmarks?q=python")
+
+    async def test_search_empty_results(self):
+        from unittest.mock import patch, MagicMock
+
+        mock_response_data = {"count": 0, "results": []}
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(self.ctx, self._make_query("nonexistent"))
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:no_bookmarks_found")
+            self.assertEqual(res.sub_title, "i18n:no_bookmarks_found_sub")
+            self.assertEqual(len(res.actions), 1)
+            self.assertEqual(res.actions[0].name, "i18n:action_open_in_linkding")
+
+    async def test_search_auth_error_handling(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        http_error = urllib.error.HTTPError(
+            url="https://linkding.example.com/api/bookmarks/",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=None,
+        )
+
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            response = await self.plugin.query(self.ctx, self._make_query("test"))
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:error_auth_failed")
+            self.assertEqual(res.sub_title, "i18n:error_auth_failed_sub")
+
+    async def test_search_network_error_and_timeout(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        url_error = urllib.error.URLError(reason="Connection refused")
+        with patch("urllib.request.urlopen", side_effect=url_error):
+            response = await self.plugin.query(self.ctx, self._make_query("test"))
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:error_network")
+            self.assertIn("Connection refused", res.sub_title)
+
+        timeout_error = TimeoutError("timed out")
+        with patch("urllib.request.urlopen", side_effect=timeout_error):
+            response = await self.plugin.query(self.ctx, self._make_query("test"))
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:error_timeout")
+            self.assertEqual(res.sub_title, "i18n:error_timeout_sub")
+
+
 if __name__ == "__main__":
     unittest.main()
+

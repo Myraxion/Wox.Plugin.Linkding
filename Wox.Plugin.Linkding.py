@@ -29,7 +29,17 @@
 #       "setting_api_token_required": "Please configure your Linkding API token",
 #       "setting_max_results_label": "Max Results",
 #       "setting_max_results_tooltip": "Maximum number of search results to display (default: 10)",
-#       "prompt_empty_search": "Type to search bookmarks, or paste a URL to save..."
+#       "prompt_empty_search": "Type to search bookmarks, or paste a URL to save...",
+#       "action_open_url": "Open in Browser",
+#       "action_copy_url": "Copy URL",
+#       "action_open_in_linkding": "Open in Linkding",
+#       "no_bookmarks_found": "No bookmarks found",
+#       "no_bookmarks_found_sub": "Press Enter to search in Linkding web interface",
+#       "error_auth_failed": "Authentication Failed",
+#       "error_auth_failed_sub": "Please check your Linkding API token in settings",
+#       "error_network": "Network Connection Error",
+#       "error_timeout": "Request Timed Out",
+#       "error_timeout_sub": "Connection to Linkding server timed out"
 #     },
 #     "zh_CN": {
 #       "plugin_name": "Linkding",
@@ -42,7 +52,17 @@
 #       "setting_api_token_required": "请配置 Linkding API 令牌",
 #       "setting_max_results_label": "最大显示数量",
 #       "setting_max_results_tooltip": "搜索结果最大显示条数（默认：10）",
-#       "prompt_empty_search": "输入关键字搜索书签，或粘贴 URL 保存..."
+#       "prompt_empty_search": "输入关键字搜索书签，或粘贴 URL 保存...",
+#       "action_open_url": "在浏览器中打开",
+#       "action_copy_url": "复制链接",
+#       "action_open_in_linkding": "在 Linkding 中打开",
+#       "no_bookmarks_found": "未找到相关书签",
+#       "no_bookmarks_found_sub": "按回车在 Linkding 网页中搜索",
+#       "error_auth_failed": "认证失败",
+#       "error_auth_failed_sub": "请在设置中检查 Linkding API 令牌",
+#       "error_network": "网络连接错误",
+#       "error_timeout": "请求超时",
+#       "error_timeout_sub": "连接 Linkding 服务器超时"
 #     }
 #   },
 #   "SettingDefinitions": [
@@ -132,16 +152,27 @@ Wox Linkding Plugin
 Single-file Python SDK plugin integrating Wox launcher with Linkding.
 """
 
-from typing import Optional
+from typing import Any, Callable, Dict, List, Optional
+import asyncio
+import json
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 
 from wox_plugin import (
+    ActionContext,
     Context,
+    CopyParams,
+    CopyType,
     Plugin,
     PluginInitParams,
     PublicAPI,
     Query,
     QueryResponse,
     Result,
+    ResultAction,
     WoxImage,
 )
 
@@ -205,7 +236,171 @@ class LinkdingPlugin(Plugin):
                 ]
             )
 
-        return QueryResponse(results=[])
+        # Smart pattern recognition (ADR-0002)
+        # URLs trigger bookmark creation; # prefixes trigger tag exploration
+        if re.match(r"^https?://", search_text, re.IGNORECASE) or search_text.startswith("#"):
+            return QueryResponse(results=[])
+
+        return await self._search_bookmarks(ctx, search_text)
+
+    async def _search_bookmarks(self, ctx: Context, search_text: str) -> QueryResponse:
+        encoded_q = urllib.parse.quote(search_text)
+        req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={self.max_results}"
+        req = urllib.request.Request(
+            req_url,
+            headers={
+                "Authorization": f"Token {self.api_token}",
+                "Accept": "application/json",
+            },
+        )
+
+        try:
+            resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_auth_failed",
+                            sub_title="i18n:error_auth_failed_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ]
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title=f"Linkding API Error (HTTP {e.code})",
+                        sub_title=str(e.reason),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except urllib.error.URLError as e:
+            reason_str = str(e.reason)
+            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_timeout",
+                            sub_title="i18n:error_timeout_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ]
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_network",
+                        sub_title=reason_str,
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except TimeoutError:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_timeout",
+                        sub_title="i18n:error_timeout_sub",
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except Exception as e:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="Error searching bookmarks",
+                        sub_title=str(e),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+
+        raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
+        web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
+
+        if not raw_bookmarks:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:no_bookmarks_found",
+                        sub_title="i18n:no_bookmarks_found_sub",
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        actions=[
+                            ResultAction(
+                                name="i18n:action_open_in_linkding",
+                                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                                is_default=True,
+                                action=self._create_open_url_action(web_search_url),
+                            )
+                        ],
+                    )
+                ]
+            )
+
+        results: List[Result] = []
+        for item in raw_bookmarks:
+            bm_url = item.get("url", "")
+            title = item.get("title") or item.get("website_title") or bm_url
+            tags = item.get("tag_names") or []
+            if tags:
+                tags_str = " ".join(f"#{tag}" for tag in tags)
+                sub_title = f"{bm_url} · {tags_str}"
+            else:
+                sub_title = bm_url
+
+            actions = [
+                ResultAction(
+                    name="i18n:action_open_url",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=True,
+                    action=self._create_open_url_action(bm_url),
+                ),
+                ResultAction(
+                    name="i18n:action_copy_url",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=False,
+                    action=self._create_copy_url_action(bm_url),
+                ),
+                ResultAction(
+                    name="i18n:action_open_in_linkding",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=False,
+                    action=self._create_open_url_action(web_search_url),
+                ),
+            ]
+
+            results.append(
+                Result(
+                    title=title,
+                    sub_title=sub_title,
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    actions=actions,
+                )
+            )
+
+        return QueryResponse(results=results)
+
+    def _fetch_bookmarks_http(self, req: urllib.request.Request) -> Dict[str, Any]:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read()
+            return json.loads(data.decode("utf-8"))
+
+    def _create_open_url_action(self, target_url: str):
+        async def _action(ctx: Context, action_ctx: ActionContext) -> None:
+            webbrowser.open(target_url)
+
+        return _action
+
+    def _create_copy_url_action(self, target_url: str):
+        async def _action(ctx: Context, action_ctx: ActionContext) -> None:
+            if self.api:
+                await self.api.copy(ctx, CopyParams(type=CopyType.TEXT, text=target_url))
+
+        return _action
 
 
 plugin = LinkdingPlugin()
+
