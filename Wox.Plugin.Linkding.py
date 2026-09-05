@@ -44,7 +44,11 @@
 #       "prompt_save_bookmark": "Press Enter to save bookmark",
 #       "action_save_bookmark": "Save Bookmark",
 #       "notify_bookmark_created": "Bookmark saved successfully",
-#       "notify_bookmark_failed": "Failed to save bookmark"
+#       "notify_bookmark_failed": "Failed to save bookmark",
+#       "no_tags_found": "No tags found",
+#       "no_tags_found_sub": "No tags found in your Linkding instance",
+#       "no_matching_tags": "No matching tags",
+#       "tag_action_select": "Filter bookmarks by this tag"
 #     },
 #     "zh_CN": {
 #       "plugin_name": "Linkding",
@@ -72,7 +76,11 @@
 #       "prompt_save_bookmark": "按回车添加书签",
 #       "action_save_bookmark": "保存书签",
 #       "notify_bookmark_created": "书签添加成功",
-#       "notify_bookmark_failed": "书签保存失败"
+#       "notify_bookmark_failed": "书签保存失败",
+#       "no_tags_found": "未找到标签",
+#       "no_tags_found_sub": "Linkding 实例中暂无标签",
+#       "no_matching_tags": "未找到匹配的标签",
+#       "tag_action_select": "按回车筛选此标签下的书签"
 #     }
 #   },
 #   "SettingDefinitions": [
@@ -166,6 +174,7 @@ from typing import Any, Callable, Dict, List, Optional
 import asyncio
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -173,6 +182,7 @@ import webbrowser
 
 from wox_plugin import (
     ActionContext,
+    ChangeQueryParam,
     Context,
     CopyParams,
     CopyType,
@@ -181,6 +191,7 @@ from wox_plugin import (
     PublicAPI,
     Query,
     QueryResponse,
+    QueryType,
     Result,
     ResultAction,
     WoxImage,
@@ -205,6 +216,9 @@ class LinkdingPlugin(Plugin):
         self.linkding_url: str = ""
         self.api_token: str = ""
         self.max_results: int = 10
+        self._tag_cache: Optional[List[str]] = None
+        self._tag_cache_time: float = 0.0
+        self.TAG_CACHE_TTL: float = 300.0
 
     async def init(self, ctx: Context, params: PluginInitParams) -> None:
         self.api = params.api
@@ -222,13 +236,18 @@ class LinkdingPlugin(Plugin):
     async def _on_setting_changed(self, ctx: Context, key: str, value: str) -> None:
         if key == "linkding_url":
             self.linkding_url = value.strip().rstrip("/") if value else ""
+            self._tag_cache = None
+            self._tag_cache_time = 0.0
         elif key == "api_token":
             self.api_token = value.strip() if value else ""
+            self._tag_cache = None
+            self._tag_cache_time = 0.0
         elif key == "max_results":
             self.max_results = int(value) if value and value.strip().isdigit() else 10
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
-        search_text = (query.search or "").strip()
+        raw_search = query.search or ""
+        search_text = raw_search.strip()
 
         if not search_text:
             sub_title = (
@@ -252,7 +271,12 @@ class LinkdingPlugin(Plugin):
             return await self._handle_url_input(ctx, search_text)
 
         if search_text.startswith("#"):
-            return QueryResponse(results=[])
+            tag_content = search_text[1:]
+            # If no tag name yet (e.g. '#' or '# '), or no trailing space and no space after tag name (e.g. '#dev')
+            if not tag_content or (not raw_search.endswith(" ") and " " not in tag_content):
+                return await self._handle_tag_browsing(ctx, query, tag_content)
+            else:
+                return await self._search_bookmarks(ctx, search_text)
 
         return await self._search_bookmarks(ctx, search_text)
 
@@ -613,6 +637,154 @@ class LinkdingPlugin(Plugin):
 
         return _action
 
+    async def _get_tags(self, ctx: Context) -> List[str]:
+        now = time.time()
+        if self._tag_cache is not None and (now - self._tag_cache_time) < self.TAG_CACHE_TTL:
+            return self._tag_cache
+
+        req_url = f"{self.linkding_url}/api/tags/"
+        req = urllib.request.Request(
+            req_url,
+            headers={
+                "Authorization": f"Token {self.api_token}",
+                "Accept": "application/json",
+            },
+        )
+        resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        raw_tags = resp_data.get("results", [])
+        tags = [t["name"] for t in raw_tags if isinstance(t, dict) and "name" in t]
+        self._tag_cache = tags
+        self._tag_cache_time = now
+        return tags
+
+    async def _handle_tag_browsing(
+        self, ctx: Context, query: Query, tag_prefix: str
+    ) -> QueryResponse:
+        try:
+            tags = await self._get_tags(ctx)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_auth_failed",
+                            sub_title="i18n:error_auth_failed_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ]
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title=f"Linkding API Error (HTTP {e.code})",
+                        sub_title=str(e.reason),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except urllib.error.URLError as e:
+            reason_str = str(e.reason)
+            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_timeout",
+                            sub_title="i18n:error_timeout_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ]
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_network",
+                        sub_title=reason_str,
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except TimeoutError:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_timeout",
+                        sub_title="i18n:error_timeout_sub",
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except Exception as e:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="Error fetching tags",
+                        sub_title=str(e),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+
+        if tag_prefix:
+            prefix_lower = tag_prefix.lower()
+            matching_tags = [t for t in tags if t.lower().startswith(prefix_lower)]
+        else:
+            matching_tags = list(tags)
+
+        if not matching_tags:
+            if not tags:
+                title = "i18n:no_tags_found"
+                sub_title = "i18n:no_tags_found_sub"
+            else:
+                title = "i18n:no_matching_tags"
+                sub_title = f"#{tag_prefix}"
+
+            return QueryResponse(
+                results=[
+                    Result(
+                        title=title,
+                        sub_title=sub_title,
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+
+        trigger = query.trigger_keyword or "ld"
+        results: List[Result] = []
+        for tag in matching_tags[: self.max_results]:
+            actions = [
+                ResultAction(
+                    name="i18n:tag_action_select",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=True,
+                    action=self._create_select_tag_action(tag, trigger),
+                ),
+            ]
+            results.append(
+                Result(
+                    title=f"#{tag}",
+                    sub_title="i18n:tag_action_select",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    actions=actions,
+                )
+            )
+
+        return QueryResponse(results=results)
+
+    def _create_select_tag_action(self, tag: str, trigger_keyword: str):
+        async def _action(ctx: Context, action_ctx: ActionContext) -> None:
+            if self.api:
+                kw = trigger_keyword or "ld"
+                await self.api.change_query(
+                    ctx,
+                    ChangeQueryParam(
+                        query_type=QueryType.INPUT,
+                        query_text=f"{kw} #{tag} ",
+                    ),
+                )
+
+        return _action
+
 
 plugin = LinkdingPlugin()
+
 

@@ -18,9 +18,14 @@ class MockPublicAPI:
             "action_save_bookmark": "Save Bookmark",
             "notify_bookmark_created": "Bookmark saved successfully",
             "notify_bookmark_failed": "Failed to save bookmark",
+            "no_tags_found": "No tags found",
+            "no_tags_found_sub": "No tags found in your Linkding instance",
+            "no_matching_tags": "No matching tags",
+            "tag_action_select": "Filter bookmarks by this tag",
         }
         self.copied_params = []
         self.notifications = []
+        self.changed_queries = []
 
     async def get_setting(self, ctx: Context, key: str) -> str:
         return self.settings.get(key, "")
@@ -39,6 +44,9 @@ class MockPublicAPI:
 
     async def notify(self, ctx: Context, message: str) -> None:
         self.notifications.append(message)
+
+    async def change_query(self, ctx: Context, param) -> None:
+        self.changed_queries.append(param)
 
 
 def extract_header_metadata(plugin_file_path: Path) -> dict:
@@ -140,6 +148,10 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("action_save_bookmark", i18n[lang])
             self.assertIn("notify_bookmark_created", i18n[lang])
             self.assertIn("notify_bookmark_failed", i18n[lang])
+            self.assertIn("no_tags_found", i18n[lang])
+            self.assertIn("no_tags_found_sub", i18n[lang])
+            self.assertIn("no_matching_tags", i18n[lang])
+            self.assertIn("tag_action_select", i18n[lang])
 
 
 class TestPluginLifecycle(unittest.IsolatedAsyncioTestCase):
@@ -296,8 +308,10 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock, patch
 
         with patch.object(self.plugin, "_search_bookmarks") as mock_search, \
-             patch.object(self.plugin, "_handle_url_input", new_callable=AsyncMock) as mock_handle_url:
+             patch.object(self.plugin, "_handle_url_input", new_callable=AsyncMock) as mock_handle_url, \
+             patch.object(self.plugin, "_handle_tag_browsing", new_callable=AsyncMock) as mock_handle_tag:
             mock_handle_url.return_value = QueryResponse(results=[])
+            mock_handle_tag.return_value = QueryResponse(results=[])
 
             res1 = await self.plugin.query(self.ctx, self._make_query("https://example.com/page"))
             mock_handle_url.assert_called_with(self.ctx, "https://example.com/page")
@@ -305,8 +319,9 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
             res2 = await self.plugin.query(self.ctx, self._make_query("http://insecure.org"))
             mock_handle_url.assert_called_with(self.ctx, "http://insecure.org")
 
-            res3 = await self.plugin.query(self.ctx, self._make_query("#python"))
-            self.assertEqual(res3.results, [])
+            q3 = self._make_query("#python")
+            res3 = await self.plugin.query(self.ctx, q3)
+            mock_handle_tag.assert_called_with(self.ctx, q3, "python")
 
             mock_search.assert_not_called()
 
@@ -692,7 +707,299 @@ class TestBookmarkCreationAndDuplicateCheck(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.results[0].title, "i18n:error_network")
 
 
+class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+
+        self.mock_api = MockPublicAPI(initial_settings={
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+            "max_results": "10",
+        })
+        self.ctx = Context()
+        params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
+        await self.plugin.init(self.ctx, params)
+
+    def _make_query(self, search: str) -> Query:
+        return Query(
+            id="q_tag",
+            type=QueryType.INPUT,
+            raw_query=f"ld {search}",
+            selection=Selection(),
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search=search,
+        )
+
+    async def test_tag_browsing_empty_prefix_returns_all_tags(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {
+            "count": 3,
+            "results": [
+                {"id": 1, "name": "dev"},
+                {"id": 2, "name": "python"},
+                {"id": 3, "name": "ai"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+
+            self.assertEqual(len(response.results), 3)
+            self.assertEqual(response.results[0].title, "#dev")
+            self.assertEqual(response.results[1].title, "#python")
+            self.assertEqual(response.results[2].title, "#ai")
+
+            # Check that GET /api/tags/ was requested
+            self.assertEqual(mock_urlopen.call_count, 1)
+            req = mock_urlopen.call_args[0][0]
+            self.assertEqual(req.full_url, "https://linkding.example.com/api/tags/")
+            self.assertEqual(req.headers.get("Authorization"), "Token secret_token")
+
+    async def test_tag_browsing_prefix_filtering(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {
+            "count": 4,
+            "results": [
+                {"id": 1, "name": "dev"},
+                {"id": 2, "name": "development"},
+                {"id": 3, "name": "design"},
+                {"id": 4, "name": "python"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            # Query #dev filters to "dev" and "development"
+            response = await self.plugin.query(self.ctx, self._make_query("#dev"))
+            self.assertEqual(len(response.results), 2)
+            self.assertEqual(response.results[0].title, "#dev")
+            self.assertEqual(response.results[1].title, "#development")
+
+            # Case-insensitive matching: #DEV
+            response_upper = await self.plugin.query(self.ctx, self._make_query("#DEV"))
+            self.assertEqual(len(response_upper.results), 2)
+            self.assertEqual(response_upper.results[0].title, "#dev")
+            self.assertEqual(response_upper.results[1].title, "#development")
+
+    async def test_tag_browsing_placeholders(self):
+        from unittest.mock import MagicMock, patch
+
+        # Case 1: Empty tag list in Linkding
+        empty_tags_data = {"count": 0, "results": []}
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(empty_tags_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:no_tags_found")
+
+        # Reset cache for Case 2
+        self.plugin._tag_cache = None
+        self.plugin._tag_cache_time = 0.0
+
+        # Case 2: Tags exist, but none match user prefix
+        tags_data = {"count": 1, "results": [{"id": 1, "name": "python"}]}
+        mock_http_resp2 = MagicMock()
+        mock_http_resp2.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_http_resp2.__enter__.return_value = mock_http_resp2
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp2):
+            response2 = await self.plugin.query(self.ctx, self._make_query("#ruby"))
+            self.assertEqual(len(response2.results), 1)
+            self.assertEqual(response2.results[0].title, "i18n:no_matching_tags")
+            self.assertIn("#ruby", response2.results[0].sub_title)
+
+    async def test_tag_cache_ttl_and_lazy_refresh(self):
+        import time
+        from unittest.mock import MagicMock, patch
+
+        tags_v1 = {"count": 1, "results": [{"id": 1, "name": "initial"}]}
+        tags_v2 = {"count": 2, "results": [{"id": 1, "name": "initial"}, {"id": 2, "name": "refreshed"}]}
+
+        mock_resp_v1 = MagicMock()
+        mock_resp_v1.read.return_value = json.dumps(tags_v1).encode("utf-8")
+        mock_resp_v1.__enter__.return_value = mock_resp_v1
+
+        mock_resp_v2 = MagicMock()
+        mock_resp_v2.read.return_value = json.dumps(tags_v2).encode("utf-8")
+        mock_resp_v2.__enter__.return_value = mock_resp_v2
+
+        start_time = 1000.0
+
+        # Initial fetch at start_time
+        with patch("time.time", return_value=start_time), \
+             patch("urllib.request.urlopen", return_value=mock_resp_v1) as mock_urlopen:
+            res1 = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(res1.results), 1)
+            self.assertEqual(res1.results[0].title, "#initial")
+            self.assertEqual(mock_urlopen.call_count, 1)
+
+            # Query at start_time + 100s (within 300s TTL): uses cache, no new HTTP call
+            with patch("time.time", return_value=start_time + 100.0):
+                res2 = await self.plugin.query(self.ctx, self._make_query("#"))
+                self.assertEqual(len(res2.results), 1)
+                self.assertEqual(mock_urlopen.call_count, 1)
+
+        # Query at start_time + 301s (TTL expired): lazy refresh makes HTTP call
+        with patch("time.time", return_value=start_time + 301.0), \
+             patch("urllib.request.urlopen", return_value=mock_resp_v2) as mock_urlopen_refresh:
+            res3 = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(res3.results), 2)
+            self.assertEqual(res3.results[1].title, "#refreshed")
+            self.assertEqual(mock_urlopen_refresh.call_count, 1)
+
+    async def test_tag_cache_invalidation_on_settings_change(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {"count": 1, "results": [{"id": 1, "name": "tag1"}]}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(mock_urlopen.call_count, 1)
+
+            # Simulating setting change
+            callback = self.mock_api.setting_changed_callbacks[0]
+            await callback(self.ctx, "api_token", "new_token")
+
+            # Next tag query should fetch again because cache was invalidated
+            await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(mock_urlopen.call_count, 2)
+
+    async def test_tag_selection_invokes_change_query(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        tags_data = {"count": 1, "results": [{"id": 1, "name": "dev"}]}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            result = response.results[0]
+            self.assertEqual(result.title, "#dev")
+            self.assertTrue(len(result.actions) >= 1)
+
+            action = result.actions[0]
+            self.assertTrue(action.is_default)
+            await action.action(self.ctx, ActionContext())
+
+            self.assertEqual(len(self.mock_api.changed_queries), 1)
+            change_param = self.mock_api.changed_queries[0]
+            self.assertEqual(change_param.query_type, QueryType.INPUT)
+            # Must update launcher input to "ld #<selected_tag> " with trailing space
+            self.assertEqual(change_param.query_text, "ld #dev ")
+
+    async def test_tag_trailing_space_triggers_bookmark_search(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 1,
+            "results": [
+                {
+                    "id": 1,
+                    "url": "https://dev.example.com",
+                    "title": "Dev Site",
+                    "tag_names": ["dev"],
+                }
+            ],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            # ld #dev with trailing space
+            response = await self.plugin.query(self.ctx, self._make_query("#dev "))
+
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "Dev Site")
+
+            self.assertEqual(mock_urlopen.call_count, 1)
+            req = mock_urlopen.call_args[0][0]
+            # Route to bookmark search using #<tag> as filter query: GET /api/bookmarks/?q=%23dev&limit=10
+            self.assertIn("/api/bookmarks/?q=%23dev&limit=10", req.full_url)
+            self.assertEqual(req.headers.get("Authorization"), "Token secret_token")
+
+    async def test_tag_trailing_space_with_additional_query(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {"count": 0, "results": []}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, self._make_query("#dev python"))
+
+            self.assertEqual(mock_urlopen.call_count, 1)
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/?q=%23dev%20python&limit=10", req.full_url)
+
+    async def test_tag_browsing_error_handling(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        # 401 Unauthorized
+        http_error = urllib.error.HTTPError(
+            url="https://linkding.example.com/api/tags/",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:error_auth_failed")
+
+        # Reset cache
+        self.plugin._tag_cache = None
+        self.plugin._tag_cache_time = 0.0
+
+        # Timeout
+        timeout_error = TimeoutError("timed out")
+        with patch("urllib.request.urlopen", side_effect=timeout_error):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:error_timeout")
+
+        # Reset cache
+        self.plugin._tag_cache = None
+        self.plugin._tag_cache_time = 0.0
+
+        # Network error
+        url_error = urllib.error.URLError(reason="Connection refused")
+        with patch("urllib.request.urlopen", side_effect=url_error):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:error_network")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
