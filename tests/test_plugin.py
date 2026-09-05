@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from wox_plugin import Context, PluginInitParams, Query, QueryType, Result, WoxImage, WoxImageType
+from wox_plugin import Context, PluginInitParams, Query, QueryResponse, QueryType, Result, WoxImage, WoxImageType
 from wox_plugin.models.query import QueryEnv, Selection
 
 
@@ -12,9 +12,15 @@ class MockPublicAPI:
         self.settings = initial_settings or {}
         self.setting_changed_callbacks = []
         self.translations = {
-            "prompt_empty_search": "Type to search bookmarks, or paste a URL to save..."
+            "prompt_empty_search": "Type to search bookmarks, or paste a URL to save...",
+            "bookmark_already_exists": "⚠️ Already bookmarked",
+            "prompt_save_bookmark": "Press Enter to save bookmark",
+            "action_save_bookmark": "Save Bookmark",
+            "notify_bookmark_created": "Bookmark saved successfully",
+            "notify_bookmark_failed": "Failed to save bookmark",
         }
         self.copied_params = []
+        self.notifications = []
 
     async def get_setting(self, ctx: Context, key: str) -> str:
         return self.settings.get(key, "")
@@ -30,6 +36,9 @@ class MockPublicAPI:
 
     async def copy(self, ctx: Context, params) -> None:
         self.copied_params.append(params)
+
+    async def notify(self, ctx: Context, message: str) -> None:
+        self.notifications.append(message)
 
 
 def extract_header_metadata(plugin_file_path: Path) -> dict:
@@ -126,6 +135,11 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("error_network", i18n[lang])
             self.assertIn("error_timeout", i18n[lang])
             self.assertIn("error_timeout_sub", i18n[lang])
+            self.assertIn("bookmark_already_exists", i18n[lang])
+            self.assertIn("prompt_save_bookmark", i18n[lang])
+            self.assertIn("action_save_bookmark", i18n[lang])
+            self.assertIn("notify_bookmark_created", i18n[lang])
+            self.assertIn("notify_bookmark_failed", i18n[lang])
 
 
 class TestPluginLifecycle(unittest.IsolatedAsyncioTestCase):
@@ -277,15 +291,19 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_routing_ignores_url_and_tag(self):
-        # Queries matching URL pattern or # tag prefix should not trigger bookmark search
-        from unittest.mock import patch
+        # Queries matching URL pattern route to _handle_url_input, not _search_bookmarks
+        # Queries matching # tag prefix do not trigger bookmark search
+        from unittest.mock import AsyncMock, patch
 
-        with patch.object(self.plugin, "_search_bookmarks") as mock_search:
+        with patch.object(self.plugin, "_search_bookmarks") as mock_search, \
+             patch.object(self.plugin, "_handle_url_input", new_callable=AsyncMock) as mock_handle_url:
+            mock_handle_url.return_value = QueryResponse(results=[])
+
             res1 = await self.plugin.query(self.ctx, self._make_query("https://example.com/page"))
-            self.assertEqual(res1.results, [])
+            mock_handle_url.assert_called_with(self.ctx, "https://example.com/page")
 
             res2 = await self.plugin.query(self.ctx, self._make_query("http://insecure.org"))
-            self.assertEqual(res2.results, [])
+            mock_handle_url.assert_called_with(self.ctx, "http://insecure.org")
 
             res3 = await self.plugin.query(self.ctx, self._make_query("#python"))
             self.assertEqual(res3.results, [])
@@ -458,6 +476,223 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.sub_title, "i18n:error_timeout_sub")
 
 
+
+class TestBookmarkCreationAndDuplicateCheck(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+
+        self.mock_api = MockPublicAPI(initial_settings={
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+            "max_results": "10",
+        })
+        self.ctx = Context()
+        params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
+        await self.plugin.init(self.ctx, params)
+
+    def _make_query(self, search: str) -> Query:
+        return Query(
+            id="q_url",
+            type=QueryType.INPUT,
+            raw_query=f"ld {search}",
+            selection=Selection(),
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search=search,
+        )
+
+    def test_parse_url_and_tags(self):
+        # Plain URL
+        url, tags = self.plugin._parse_url_and_tags("https://example.com")
+        self.assertEqual(url, "https://example.com")
+        self.assertEqual(tags, [])
+
+        # URL with multiple space-separated #tags
+        url, tags = self.plugin._parse_url_and_tags("https://example.com #tech #news")
+        self.assertEqual(url, "https://example.com")
+        self.assertEqual(tags, ["tech", "news"])
+
+        # URL with fragment and deduplicated tags
+        url, tags = self.plugin._parse_url_and_tags("https://example.com/docs#intro #python #python #dev")
+        self.assertEqual(url, "https://example.com/docs#intro")
+        self.assertEqual(tags, ["python", "dev"])
+
+    async def test_duplicate_check_already_bookmarked(self):
+        from unittest.mock import MagicMock, patch
+
+        check_data = {
+            "bookmark": {
+                "id": 10,
+                "url": "https://example.com/existing",
+                "title": "Existing Title",
+                "website_title": "Web Title",
+                "tag_names": ["tech", "saved"],
+            },
+            "metadata": {"title": "Web Title"},
+            "auto_tags": [],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(check_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, self._make_query("https://example.com/existing"))
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "Existing Title")
+            self.assertIn("https://example.com/existing", res.sub_title)
+            self.assertTrue(
+                "⚠️ Already bookmarked" in res.sub_title or "bookmark_already_exists" in res.sub_title,
+                f"SubTitle should mention already bookmarked warning, got: {res.sub_title}",
+            )
+            self.assertIn("#tech #saved", res.sub_title)
+
+            # Check actions
+            self.assertEqual(len(res.actions), 3)
+            self.assertEqual(res.actions[0].name, "i18n:action_open_url")
+            self.assertTrue(res.actions[0].is_default)
+            self.assertEqual(res.actions[1].name, "i18n:action_copy_url")
+            self.assertEqual(res.actions[2].name, "i18n:action_open_in_linkding")
+
+            # Check GET /api/bookmarks/check/?url=... call
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fexample.com%2Fexisting", req.full_url)
+            self.assertEqual(req.headers.get("Authorization"), "Token secret_token")
+
+    async def test_duplicate_check_not_bookmarked_shows_save_prompt(self):
+        from unittest.mock import MagicMock, patch
+
+        check_data = {
+            "bookmark": None,
+            "metadata": {"title": "Some Scraped Title"},
+            "auto_tags": [],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(check_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(
+                self.ctx, self._make_query("https://newsite.com/docs #reading #ai")
+            )
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:prompt_save_bookmark")
+            self.assertIn("https://newsite.com/docs", res.sub_title)
+            self.assertIn("#reading #ai", res.sub_title)
+
+            # Check actions
+            self.assertTrue(len(res.actions) >= 1)
+            save_action = res.actions[0]
+            self.assertEqual(save_action.name, "i18n:action_save_bookmark")
+            self.assertTrue(save_action.is_default)
+
+    async def test_submit_new_bookmark_action_posts_payload_and_notifies(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        check_data = {
+            "bookmark": None,
+            "metadata": {},
+            "auto_tags": [],
+        }
+        created_data = {
+            "id": 99,
+            "url": "https://newsite.com/docs",
+            "tag_names": ["reading", "ai"],
+        }
+
+        mock_check_resp = MagicMock()
+        mock_check_resp.read.return_value = json.dumps(check_data).encode("utf-8")
+        mock_check_resp.__enter__.return_value = mock_check_resp
+
+        mock_create_resp = MagicMock()
+        mock_create_resp.read.return_value = json.dumps(created_data).encode("utf-8")
+        mock_create_resp.__enter__.return_value = mock_create_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_check_resp):
+            response = await self.plugin.query(
+                self.ctx, self._make_query("https://newsite.com/docs #reading #ai")
+            )
+
+        res = response.results[0]
+        save_action = res.actions[0]
+
+        # Trigger save action
+        with patch("urllib.request.urlopen", return_value=mock_create_resp) as mock_post_urlopen:
+            await save_action.action(self.ctx, ActionContext())
+
+            self.assertEqual(mock_post_urlopen.call_count, 1)
+            post_req = mock_post_urlopen.call_args[0][0]
+            self.assertEqual(post_req.full_url, "https://linkding.example.com/api/bookmarks/")
+            self.assertEqual(post_req.get_method(), "POST")
+            self.assertEqual(post_req.headers.get("Authorization"), "Token secret_token")
+            self.assertEqual(post_req.headers.get("Content-type"), "application/json")
+
+            post_body = json.loads(post_req.data.decode("utf-8"))
+            self.assertEqual(post_body.get("url"), "https://newsite.com/docs")
+            self.assertEqual(post_body.get("tag_names"), ["reading", "ai"])
+
+            # Verify notification was triggered
+            self.assertEqual(len(self.mock_api.notifications), 1)
+            self.assertIn("https://newsite.com/docs", self.mock_api.notifications[0])
+
+    async def test_submit_new_bookmark_action_failure_notifies(self):
+        from unittest.mock import patch
+        from wox_plugin import ActionContext
+        import urllib.error
+
+        save_action = self.plugin._create_save_bookmark_action("https://error.com", ["tag"])
+        http_error = urllib.error.HTTPError(
+            url="https://linkding.example.com/api/bookmarks/",
+            code=500,
+            msg="Internal Server Error",
+            hdrs={},
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            await save_action(self.ctx, ActionContext())
+            self.assertEqual(len(self.mock_api.notifications), 1)
+            self.assertTrue(
+                "Failed to save bookmark" in self.mock_api.notifications[0]
+                or "notify_bookmark_failed" in self.mock_api.notifications[0]
+            )
+
+    async def test_url_input_auth_and_network_errors(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        http_error = urllib.error.HTTPError(
+            url="https://linkding.example.com/api/bookmarks/check/",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            response = await self.plugin.query(self.ctx, self._make_query("https://example.com"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:error_auth_failed")
+
+        url_error = urllib.error.URLError(reason="Connection refused")
+        with patch("urllib.request.urlopen", side_effect=url_error):
+            response = await self.plugin.query(self.ctx, self._make_query("https://example.com"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:error_network")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -39,7 +39,12 @@
 #       "error_auth_failed_sub": "Please check your Linkding API token in settings",
 #       "error_network": "Network Connection Error",
 #       "error_timeout": "Request Timed Out",
-#       "error_timeout_sub": "Connection to Linkding server timed out"
+#       "error_timeout_sub": "Connection to Linkding server timed out",
+#       "bookmark_already_exists": "⚠️ Already bookmarked",
+#       "prompt_save_bookmark": "Press Enter to save bookmark",
+#       "action_save_bookmark": "Save Bookmark",
+#       "notify_bookmark_created": "Bookmark saved successfully",
+#       "notify_bookmark_failed": "Failed to save bookmark"
 #     },
 #     "zh_CN": {
 #       "plugin_name": "Linkding",
@@ -62,7 +67,12 @@
 #       "error_auth_failed_sub": "请在设置中检查 Linkding API 令牌",
 #       "error_network": "网络连接错误",
 #       "error_timeout": "请求超时",
-#       "error_timeout_sub": "连接 Linkding 服务器超时"
+#       "error_timeout_sub": "连接 Linkding 服务器超时",
+#       "bookmark_already_exists": "⚠️ 该 URL 已收藏",
+#       "prompt_save_bookmark": "按回车添加书签",
+#       "action_save_bookmark": "保存书签",
+#       "notify_bookmark_created": "书签添加成功",
+#       "notify_bookmark_failed": "书签保存失败"
 #     }
 #   },
 #   "SettingDefinitions": [
@@ -238,7 +248,10 @@ class LinkdingPlugin(Plugin):
 
         # Smart pattern recognition (ADR-0002)
         # URLs trigger bookmark creation; # prefixes trigger tag exploration
-        if re.match(r"^https?://", search_text, re.IGNORECASE) or search_text.startswith("#"):
+        if re.match(r"^https?://", search_text, re.IGNORECASE):
+            return await self._handle_url_input(ctx, search_text)
+
+        if search_text.startswith("#"):
             return QueryResponse(results=[])
 
         return await self._search_bookmarks(ctx, search_text)
@@ -398,6 +411,205 @@ class LinkdingPlugin(Plugin):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
             if self.api:
                 await self.api.copy(ctx, CopyParams(type=CopyType.TEXT, text=target_url))
+
+        return _action
+
+    def _parse_url_and_tags(self, input_text: str) -> tuple[str, List[str]]:
+        parts = input_text.strip().split()
+        if not parts:
+            return "", []
+        url = parts[0]
+        tags: List[str] = []
+        for p in parts[1:]:
+            if p.startswith("#") and len(p) > 1:
+                tag = p[1:].strip()
+                if tag and tag not in tags:
+                    tags.append(tag)
+        return url, tags
+
+    async def _handle_url_input(self, ctx: Context, search_text: str) -> QueryResponse:
+        url, tags = self._parse_url_and_tags(search_text)
+        if not url:
+            return QueryResponse(results=[])
+
+        encoded_url = urllib.parse.quote(url, safe="")
+        req_url = f"{self.linkding_url}/api/bookmarks/check/?url={encoded_url}"
+        req = urllib.request.Request(
+            req_url,
+            headers={
+                "Authorization": f"Token {self.api_token}",
+                "Accept": "application/json",
+            },
+        )
+
+        try:
+            check_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_auth_failed",
+                            sub_title="i18n:error_auth_failed_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ]
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title=f"Linkding API Error (HTTP {e.code})",
+                        sub_title=str(e.reason),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except urllib.error.URLError as e:
+            reason_str = str(e.reason)
+            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_timeout",
+                            sub_title="i18n:error_timeout_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ]
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_network",
+                        sub_title=reason_str,
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except TimeoutError:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_timeout",
+                        sub_title="i18n:error_timeout_sub",
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+        except Exception as e:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="Error checking bookmark",
+                        sub_title=str(e),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ]
+            )
+
+        existing_bookmark = check_data.get("bookmark")
+        if existing_bookmark:
+            title = (
+                existing_bookmark.get("title")
+                or existing_bookmark.get("website_title")
+                or url
+            )
+            warning_text = (
+                await self.api.get_translation(ctx, "bookmark_already_exists")
+                if self.api
+                else "⚠️ Already bookmarked"
+            )
+            bm_tags = existing_bookmark.get("tag_names") or []
+            tags_str = " ".join(f"#{t}" for t in bm_tags)
+            if tags_str:
+                sub_title = f"{warning_text} · {url} · {tags_str}"
+            else:
+                sub_title = f"{warning_text} · {url}"
+
+            web_search_url = f"{self.linkding_url}/bookmarks?q={urllib.parse.quote(url)}"
+            actions = [
+                ResultAction(
+                    name="i18n:action_open_url",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=True,
+                    action=self._create_open_url_action(url),
+                ),
+                ResultAction(
+                    name="i18n:action_copy_url",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=False,
+                    action=self._create_copy_url_action(url),
+                ),
+                ResultAction(
+                    name="i18n:action_open_in_linkding",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=False,
+                    action=self._create_open_url_action(web_search_url),
+                ),
+            ]
+
+            return QueryResponse(
+                results=[
+                    Result(
+                        title=title,
+                        sub_title=sub_title,
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        actions=actions,
+                    )
+                ]
+            )
+
+        # Not bookmarked yet: show prompt to save
+        tags_str = " ".join(f"#{t}" for t in tags)
+        sub_title = f"{url} · {tags_str}" if tags_str else url
+        actions = [
+            ResultAction(
+                name="i18n:action_save_bookmark",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=True,
+                action=self._create_save_bookmark_action(url, tags),
+            ),
+            ResultAction(
+                name="i18n:action_open_url",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=False,
+                action=self._create_open_url_action(url),
+            ),
+        ]
+
+        return QueryResponse(
+            results=[
+                Result(
+                    title="i18n:prompt_save_bookmark",
+                    sub_title=sub_title,
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    actions=actions,
+                )
+            ]
+        )
+
+    def _create_save_bookmark_action(self, target_url: str, tags: List[str]):
+        async def _action(ctx: Context, action_ctx: ActionContext) -> None:
+            post_url = f"{self.linkding_url}/api/bookmarks/"
+            payload = json.dumps({"url": target_url, "tag_names": tags}).encode("utf-8")
+            req = urllib.request.Request(
+                post_url,
+                data=payload,
+                headers={
+                    "Authorization": f"Token {self.api_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                await asyncio.to_thread(self._fetch_bookmarks_http, req)
+                if self.api:
+                    msg = await self.api.get_translation(ctx, "notify_bookmark_created")
+                    await self.api.notify(ctx, f"{msg}: {target_url}")
+            except Exception as e:
+                if self.api:
+                    msg = await self.api.get_translation(ctx, "notify_bookmark_failed")
+                    await self.api.notify(ctx, f"{msg}: {e}")
 
         return _action
 
