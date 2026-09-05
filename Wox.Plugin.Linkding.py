@@ -209,6 +209,8 @@ LINKDING_ICON_SVG = (
     '</g></svg>'
 )
 
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wox.Plugin.Linkding/1.0.0"
+
 
 class LinkdingPlugin(Plugin):
     def __init__(self) -> None:
@@ -219,6 +221,24 @@ class LinkdingPlugin(Plugin):
         self._tag_cache: Optional[List[str]] = None
         self._tag_cache_time: float = 0.0
         self.TAG_CACHE_TTL: float = 300.0
+
+    def _create_request(
+        self,
+        url: str,
+        data: Optional[bytes] = None,
+        method: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ) -> urllib.request.Request:
+        headers = {
+            "Authorization": f"Token {self.api_token}",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        if method:
+            return urllib.request.Request(url, data=data, headers=headers, method=method)
+        return urllib.request.Request(url, data=data, headers=headers)
 
     async def init(self, ctx: Context, params: PluginInitParams) -> None:
         self.api = params.api
@@ -283,13 +303,7 @@ class LinkdingPlugin(Plugin):
     async def _search_bookmarks(self, ctx: Context, search_text: str) -> QueryResponse:
         encoded_q = urllib.parse.quote(search_text)
         req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={self.max_results}"
-        req = urllib.request.Request(
-            req_url,
-            headers={
-                "Authorization": f"Token {self.api_token}",
-                "Accept": "application/json",
-            },
-        )
+        req = self._create_request(req_url)
 
         try:
             resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
@@ -458,13 +472,7 @@ class LinkdingPlugin(Plugin):
 
         encoded_url = urllib.parse.quote(url, safe="")
         req_url = f"{self.linkding_url}/api/bookmarks/check/?url={encoded_url}"
-        req = urllib.request.Request(
-            req_url,
-            headers={
-                "Authorization": f"Token {self.api_token}",
-                "Accept": "application/json",
-            },
-        )
+        req = self._create_request(req_url)
 
         try:
             check_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
@@ -615,15 +623,11 @@ class LinkdingPlugin(Plugin):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
             post_url = f"{self.linkding_url}/api/bookmarks/"
             payload = json.dumps({"url": target_url, "tag_names": tags}).encode("utf-8")
-            req = urllib.request.Request(
+            req = self._create_request(
                 post_url,
                 data=payload,
-                headers={
-                    "Authorization": f"Token {self.api_token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
                 method="POST",
+                content_type="application/json",
             )
             try:
                 await asyncio.to_thread(self._fetch_bookmarks_http, req)
@@ -643,13 +647,7 @@ class LinkdingPlugin(Plugin):
             return self._tag_cache
 
         req_url = f"{self.linkding_url}/api/tags/"
-        req = urllib.request.Request(
-            req_url,
-            headers={
-                "Authorization": f"Token {self.api_token}",
-                "Accept": "application/json",
-            },
-        )
+        req = self._create_request(req_url)
         resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
         raw_tags = resp_data.get("results", [])
         tags = [t["name"] for t in raw_tags if isinstance(t, dict) and "name" in t]

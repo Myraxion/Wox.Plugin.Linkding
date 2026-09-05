@@ -364,6 +364,7 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
             self.assertIn("https://linkding.example.com/api/bookmarks/?q=python&limit=10", req.full_url)
             self.assertEqual(req.headers.get("Authorization"), "Token secret_token")
             self.assertEqual(req.headers.get("Accept"), "application/json")
+            self.assertTrue(req.headers.get("User-agent"), "User-Agent must be set to prevent Cloudflare blocks")
 
             # Check result 1 formatting
             r1 = response.results[0]
