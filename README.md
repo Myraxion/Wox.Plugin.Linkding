@@ -18,9 +18,7 @@
 
 ## 📖 简介
 
-**Wox.Plugin.Linkding** 是一个单文件 Python SDK 插件，让你可以直接在桌面端通过键盘在自建的 Linkding 书签服务中实现快速检索、智能收藏与标签导航。
-
-遵循 **KISS** 与 **ADR-0001（单文件插件架构）** 原则，插件完全依赖 Python 标准库实现，零外部依赖，启动极速且内存占用低。
+**Wox.Plugin.Linkding** 是一个单文件 Python SDK 插件，让你可以通过 Wox 在自建的 Linkding 书签服务中实现快速检索、智能收藏与标签导航。
 
 ---
 
@@ -28,7 +26,6 @@
 
 - 🔍 **即时书签搜索**
   - 输入 `ld <关键字>` 即可全文检索书签的标题、描述与网址。
-  - 内置 Wox 原生 300ms 输入防抖（Debounce），避免高频输入导致服务端负载过高。
 - ⚡ **多动作交互支持**
   - **默认动作（回车）**：在系统默认浏览器中直接打开书签。
   - **复制链接**：一键将书签 URL 拷贝至系统剪贴板。
@@ -36,9 +33,9 @@
 - 🏷️ **交互式标签浏览与检索（Tag Browsing）**
   - 输入 `ld #` 列出所有标签；输入 `ld #<前缀>`（如 `ld #dev`）实时进行不区分大小写的前缀过滤。
   - 内置标签内存缓存与 300 秒 TTL 惰性刷新机制，浏览体验如丝般顺滑。
-  - 选中标签回车自动将输入更新为 `ld #<tag> `（附带末尾空格），立即展示该标签下的所有书签。
+  - 选中标签回车自动将输入更新为 `ld #<tag>`（附带末尾空格），立即展示该标签下的所有书签。
 - ➕ **智能收藏与重复检测（Smart Bookmark Creation）**
-  - 基于 **ADR-0002（智能模式识别）**，直接输入或粘贴 URL（如 `ld https://...`）自动进入添加模式，无需记忆或输入任何子命令。
+  - **智能模式识别**，直接输入或粘贴 URL（如 `ld https://...`）自动进入添加模式，无需记忆或输入任何子命令。
   - 自动调用 Linkding `/check` 接口检测是否已收藏；若已收藏则展示预警提示，防止重复添加。
   - 支持快捷追加标签：`ld https://example.com #tech #dev` 自动提取空格分隔的 `#tag` 并为书签打标。
   - 触发 Linkding 服务端自动刮削（Scrape）网页标题和描述。
@@ -52,11 +49,13 @@
 ## 🛠️ 安装与配置
 
 ### 1. 获取 Linkding API Token
+
 1. 登录你的 Linkding 网页控制台。
 2. 进入 **Settings** -> 找到 **REST API** 区域。
 3. 复制生成的 **API Token**。
 
 ### 2. 在 Wox 中配置插件
+
 1. 呼出 Wox，输入 `ld` 或进入 Wox 设置页面找到 **Linkding** 插件。
 2. 填写以下配置项：
    - **Linkding URL**：Linkding 服务基础地址（例如 `https://linkding.example.com`，末尾不需要斜杠）。
@@ -71,8 +70,8 @@
 | :--- | :--- | :--- |
 | **基础搜索** | `ld python` | 搜索包含 "python" 的书签，展示标题、网址与关联标签 |
 | **浏览全部标签** | `ld #` | 展示所有可用标签 |
-| **前缀筛选标签** | `ld #dev` | 过滤以 "dev" 开头的标签，回车自动填充 `ld #dev ` |
-| **按标签过滤书签** | `ld #dev ` | 展示所有包含 `dev` 标签的书签 |
+| **前缀筛选标签** | `ld #dev` | 过滤以 "dev" 开头的标签，回车自动填充 `ld #dev` |
+| **按标签过滤书签** | `ld #dev` | 展示所有包含 `dev` 标签的书签 |
 | **标签 + 关键字搜索**| `ld #dev fastapi` | 检索带有 `dev` 标签且包含 "fastapi" 的书签 |
 | **快速添加书签** | `ld https://news.ycombinator.com` | 检测是否已存在，按回车快速添加 |
 | **带标签添加书签** | `ld https://github.com #dev #git` | 添加书签并自动绑定 `dev` 和 `git` 两个标签 |
@@ -84,11 +83,13 @@
 本项目使用标准 Python `unittest` 与 `mypy` 进行质量保证。
 
 ### 运行全量测试套件
+
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ### 运行类型检查
+
 ```bash
 python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 ```
