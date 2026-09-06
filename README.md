@@ -110,6 +110,13 @@ python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 
 ---
 
+## 🙏 Acknowledgements
+
+- [Linkding](https://github.com/sissbruecker/linkding) is created by [Sascha Ißbrücker](https://github.com/sissbruecker) and licensed under the MIT License.
+- Built for the [Wox](https://github.com/Wox-launcher/Wox) launcher ecosystem.
+
+---
+
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).

@@ -110,6 +110,13 @@ python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 
 ---
 
+## 🙏 鸣谢与致谢
+
+- [Linkding](https://github.com/sissbruecker/linkding) 由 [Sascha Ißbrücker](https://github.com/sissbruecker) 创建并遵循 MIT 协议开源。
+- 感谢 [Wox](https://github.com/Wox-launcher/Wox) 启动器生态。
+
+---
+
 ## 📄 开源许可证
 
 本项目遵循 [MIT License](LICENSE)。
