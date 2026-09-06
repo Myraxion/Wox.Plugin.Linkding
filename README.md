@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>专为 <a href="https://github.com/Wox-launcher/Wox">Wox</a> 启动器打造的 <a href="https://github.com/sissbruecker/linkding">Linkding</a> 自建书签服务集成插件</strong>
+  <strong>A <a href="https://github.com/Wox-launcher/Wox">Wox</a> launcher plugin for searching, saving, and managing bookmarks from a self-hosted <a href="https://github.com/sissbruecker/linkding">Linkding</a> service.</strong>
 </p>
 
 <p align="center">
@@ -14,81 +14,85 @@
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License" />
 </p>
 
----
-
-## 📖 简介
-
-**Wox.Plugin.Linkding** 是一个单文件 Python SDK 插件，让你可以通过 Wox 在自建的 Linkding 书签服务中实现快速检索、智能收藏与标签导航。
+<p align="center">
+  English | <a href="README_zh.md">简体中文</a>
+</p>
 
 ---
 
-## ✨ 核心特性
+## 📖 Introduction
 
-- 🔍 **即时书签搜索**
-  - 输入 `ld <关键字>` 即可全文检索书签的标题、描述与网址。
-- ⚡ **多动作交互支持**
-  - **默认动作（回车）**：在系统默认浏览器中直接打开书签。
-  - **复制链接**：一键将书签 URL 拷贝至系统剪贴板。
-  - **在 Linkding 中打开**：快速跳转至 Linkding Web 端对应的搜索页面。
-- 🏷️ **交互式标签浏览与检索（Tag Browsing）**
-  - 输入 `ld #` 列出所有标签；输入 `ld #<前缀>`（如 `ld #dev`）实时进行不区分大小写的前缀过滤。
-  - 内置标签内存缓存与 300 秒 TTL 惰性刷新机制，浏览体验如丝般顺滑。
-  - 选中标签回车自动将输入更新为 `ld #<tag>`（附带末尾空格），立即展示该标签下的所有书签。
-- ➕ **智能收藏与重复检测（Smart Bookmark Creation）**
-  - **智能模式识别**，直接输入或粘贴 URL（如 `ld https://...`）自动进入添加模式，无需记忆或输入任何子命令。
-  - 自动调用 Linkding `/check` 接口检测是否已收藏；若已收藏则展示预警提示，防止重复添加。
-  - 支持快捷追加标签：`ld https://example.com #tech #dev` 自动提取空格分隔的 `#tag` 并为书签打标。
-  - 触发 Linkding 服务端自动刮削（Scrape）网页标题和描述。
-- 🌐 **双语支持（i18n）**
-  - 内置中英双语国际化，根据 Wox 系统偏好自动切换显示。
-- 🛡️ **声明式配置检验**
-  - 采用 Wox 声明式 `QueryRequirements`，首次使用时若未配置服务端地址或 Token，Wox 会直接提示填写，防止运行时静默失败。
+**Wox.Plugin.Linkding** is a single-file Python SDK plugin that allows you to quickly search, smartly save, and navigate tags in your self-hosted Linkding bookmark service directly through Wox.
 
 ---
 
-## 🛠️ 安装与配置
+## ✨ Features
 
-### 1. 获取 Linkding API Token
-
-1. 登录你的 Linkding 网页控制台。
-2. 进入 **Settings** -> 找到 **REST API** 区域。
-3. 复制生成的 **API Token**。
-
-### 2. 在 Wox 中配置插件
-
-1. 呼出 Wox，输入 `ld` 或进入 Wox 设置页面找到 **Linkding** 插件。
-2. 填写以下配置项：
-   - **Linkding URL**：Linkding 服务基础地址（例如 `https://linkding.example.com`，末尾不需要斜杠）。
-   - **API Token**：刚才复制的 REST API Token。
-   - **Max Results**：搜索结果最大展示数（默认：`10`）。
+- 🔍 **Instant Bookmark Search**
+  - Type `ld <keyword>` to perform full-text search across bookmark titles, descriptions, and URLs.
+- ⚡ **Multi-Action Interaction**
+  - **Default Action (Enter)**: Open the bookmark directly in your default browser.
+  - **Copy Link**: Copy the bookmark URL to the system clipboard in one click.
+  - **Open in Linkding**: Quickly jump to the corresponding search page in Linkding's Web UI.
+- 🏷️ **Interactive Tag Browsing & Filtering**
+  - Type `ld #` to list all tags; type `ld #<prefix>` (e.g., `ld #dev`) for real-time, case-insensitive prefix filtering.
+  - Built-in in-memory tag cache with a 300-second TTL and lazy refresh for a smooth browsing experience.
+  - Press Enter on any tag to automatically autocomplete your query to `ld #<tag> ` (with trailing space), instantly listing all bookmarks under that tag.
+- ➕ **Smart Bookmark Creation & Duplicate Detection**
+  - **Smart pattern recognition**: typing or pasting a URL directly (e.g., `ld https://...`) automatically switches to bookmark creation mode without needing any subcommands.
+  - Automatically calls Linkding's `/check` endpoint to verify if the URL is already saved, showing a warning indicator to prevent duplicates.
+  - Quick tag assignment: `ld https://example.com #tech #dev` automatically extracts space-separated `#tag`s and applies them to the bookmark.
+  - Triggers Linkding server-side auto-scraping for title and description.
+- 🌐 **Bilingual Support (i18n)**
+  - Built-in English and Simplified Chinese localization; automatically adjusts to Wox system language preferences.
+- 🛡️ **Declarative Settings Validation**
+  - Uses Wox declarative `QueryRequirements`. On first launch without a server URL or API token configured, Wox prompts you directly to fill in settings, preventing silent runtime failures.
 
 ---
 
-## 💡 使用指南
+## 🛠️ Installation & Configuration
 
-| 操作场景 | 输入示例 | 说明 |
+### 1. Obtain Linkding API Token
+
+1. Log in to your Linkding web interface.
+2. Navigate to **Settings** -> locate the **REST API** section.
+3. Copy the generated **API Token**.
+
+### 2. Configure Plugin in Wox
+
+1. Open Wox, type `ld`, or open Wox Settings and find the **Linkding** plugin.
+2. Configure the following fields:
+   - **Linkding URL**: Base URL of your Linkding instance (e.g., `https://linkding.example.com`, without trailing slash).
+   - **API Token**: The REST API Token copied in the previous step.
+   - **Max Results**: Maximum number of search results to display (default: `10`).
+
+---
+
+## 💡 Usage Guide
+
+| Scenario | Example Input | Description |
 | :--- | :--- | :--- |
-| **基础搜索** | `ld python` | 搜索包含 "python" 的书签，展示标题、网址与关联标签 |
-| **浏览全部标签** | `ld #` | 展示所有可用标签 |
-| **前缀筛选标签** | `ld #dev` | 过滤以 "dev" 开头的标签，回车自动填充 `ld #dev` |
-| **按标签过滤书签** | `ld #dev` | 展示所有包含 `dev` 标签的书签 |
-| **标签 + 关键字搜索**| `ld #dev fastapi` | 检索带有 `dev` 标签且包含 "fastapi" 的书签 |
-| **快速添加书签** | `ld https://news.ycombinator.com` | 检测是否已存在，按回车快速添加 |
-| **带标签添加书签** | `ld https://github.com #dev #git` | 添加书签并自动绑定 `dev` 和 `git` 两个标签 |
+| **Basic Search** | `ld python` | Search bookmarks containing "python", displaying title, URL, and associated tags |
+| **Browse All Tags** | `ld #` | List all available tags |
+| **Filter Tags by Prefix** | `ld #dev` | Filter tags starting with "dev", press Enter to autocomplete `ld #dev ` |
+| **Filter Bookmarks by Tag** | `ld #dev ` | Show all bookmarks containing the `dev` tag |
+| **Tag + Keyword Search** | `ld #dev fastapi` | Search for bookmarks tagged `dev` that also match "fastapi" |
+| **Quick Add Bookmark** | `ld https://news.ycombinator.com` | Check if URL exists, press Enter to quickly save |
+| **Add Bookmark with Tags** | `ld https://github.com #dev #git` | Save bookmark and automatically attach `dev` and `git` tags |
 
 ---
 
-## 🧑‍💻 开发与测试
+## 🧑‍💻 Development & Testing
 
-本项目使用标准 Python `unittest` 与 `mypy` 进行质量保证。
+This project uses standard Python `unittest` and `mypy` for quality assurance.
 
-### 运行全量测试套件
+### Run Full Test Suite
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-### 运行类型检查
+### Run Type Checking
 
 ```bash
 python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
@@ -96,16 +100,16 @@ python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 
 ---
 
-## 📂 项目结构与架构决策
+## 📂 Project Structure & Architecture Decisions
 
-- `Wox.Plugin.Linkding.py`: 包含插件元数据、配置声明、国际化与完整业务逻辑的单文件插件。
-- `tests/test_plugin.py`: 完整的行为驱动单元测试，模拟 Wox 运行环境与 Linkding HTTP 响应。
-- [CONTEXT.md](CONTEXT.md): 项目核心领域概念与专用术语表。
-- [docs/adr/0001-single-file-python-plugin.md](docs/adr/0001-single-file-python-plugin.md): 采用单文件 Python SDK 架构决策。
-- [docs/adr/0002-smart-input-recognition.md](docs/adr/0002-smart-input-recognition.md): 采用智能输入模式识别替代显式子命令决策。
+- `Wox.Plugin.Linkding.py`: Single-file plugin containing metadata, settings definitions, i18n dictionaries, and business logic.
+- `tests/test_plugin.py`: Comprehensive behavior-driven unit tests mocking Wox runtime and Linkding HTTP responses.
+- [CONTEXT.md](CONTEXT.md): Core domain concepts and ubiquitous terminology.
+- [docs/adr/0001-single-file-python-plugin.md](docs/adr/0001-single-file-python-plugin.md): ADR on adopting a single-file Python SDK architecture.
+- [docs/adr/0002-smart-input-recognition.md](docs/adr/0002-smart-input-recognition.md): ADR on smart input pattern recognition over explicit subcommands.
 
 ---
 
-## 📄 开源许可证
+## 📄 License
 
-本项目遵循 [MIT License](LICENSE)。
+This project is licensed under the [MIT License](LICENSE).
