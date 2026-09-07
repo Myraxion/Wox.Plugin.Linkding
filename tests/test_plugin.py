@@ -996,6 +996,7 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
 
             action = result.actions[0]
             self.assertTrue(action.is_default)
+            self.assertTrue(action.prevent_hide_after_action)
             await action.action(self.ctx, ActionContext())
 
             self.assertEqual(len(self.mock_api.changed_queries), 1)
@@ -1183,6 +1184,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             expand_action = res.actions[0]
             self.assertEqual(expand_action.name, "i18n:selection_action_expand")
             self.assertTrue(expand_action.is_default)
+            self.assertTrue(expand_action.prevent_hide_after_action)
             await expand_action.action(self.ctx, ActionContext())
             self.assertEqual(len(self.mock_api.changed_queries), 1)
             cq = self.mock_api.changed_queries[0]

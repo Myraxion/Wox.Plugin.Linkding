@@ -625,12 +625,14 @@ class LinkdingPlugin(Plugin):
             title = f"Linkding: {count} bookmarks found"
 
         first_bm_url = raw_bookmarks[0].get("url", "")
+        clean_search_text = " ".join(search_text.split())
         actions = [
             ResultAction(
                 name="i18n:selection_action_expand",
                 icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                 is_default=True,
-                action=self._create_change_query_action(trigger_keyword, search_text),
+                prevent_hide_after_action=True,
+                action=self._create_change_query_action(trigger_keyword, clean_search_text),
             ),
             ResultAction(
                 name="i18n:action_open_in_linkding",
@@ -1063,6 +1065,7 @@ class LinkdingPlugin(Plugin):
                     name="i18n:tag_action_select",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     is_default=True,
+                    prevent_hide_after_action=True,
                     action=self._create_select_tag_action(tag, trigger),
                 ),
             ]
