@@ -39,10 +39,12 @@
   - Built-in in-memory tag cache with a 300-second TTL and lazy refresh for a smooth browsing experience.
   - Press Enter on any tag to automatically autocomplete your query to `ld #<tag> ` (with trailing space), instantly listing all bookmarks under that tag.
 - ➕ **Smart Bookmark Creation & Duplicate Detection**
-  - **Smart pattern recognition**: typing or pasting a URL directly (e.g., `ld https://...`) automatically switches to bookmark creation mode without needing any subcommands.
+  - **Smart pattern recognition**: typing or pasting a URL directly (e.g., `ld https://...` or `ld woxlauncher.com`) automatically switches to bookmark creation mode without needing any subcommands. Unprefixed URLs (e.g., copied from browser address bars) are automatically normalized with protocol completion (`http://` for localhost/127.0.0.1, `https://` for other domains and IPs).
   - Automatically calls Linkding's `/check` endpoint to verify if the URL is already saved, showing a warning indicator to prevent duplicates.
-  - Quick tag assignment: `ld https://example.com #tech #dev` automatically extracts space-separated `#tag`s and applies them to the bookmark.
+  - Quick tag assignment: `ld woxlauncher.com #tech #dev` automatically extracts space-separated `#tag`s and applies them to the bookmark.
   - Triggers Linkding server-side auto-scraping for title and description.
+- 📌 **Selection Query Support**
+  - Select text or URLs in any browser or application and press the Wox Selection hotkey (e.g., `Win+Alt+Space`) to instantly interact with Linkding: recognized URLs trigger bookmark duplicate checking and saving, while plain text triggers bookmark search.
 - 🌐 **Bilingual Support (i18n)**
   - Built-in English and Simplified Chinese localization; automatically adjusts to Wox system language preferences.
 - 🛡️ **Declarative Settings Validation**

@@ -11,6 +11,9 @@
 #   "SupportedOS": ["Windows", "Linux", "Darwin"],
 #   "Features": [
 #     {
+#       "Name": "querySelection"
+#     },
+#     {
 #       "Name": "debounce",
 #       "Params": {
 #         "IntervalMs": 300
@@ -194,6 +197,7 @@ from wox_plugin import (
     QueryType,
     Result,
     ResultAction,
+    SelectionType,
     WoxImage,
 )
 
@@ -210,6 +214,18 @@ LINKDING_ICON_SVG = (
 )
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wox.Plugin.Linkding/1.0.0"
+
+IPV4_REGEX = re.compile(
+    r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?::\d+)?(?:[/?#].*)?$"
+)
+DOMAIN_REGEX = re.compile(
+    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?::\d+)?(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+LOCALHOST_REGEX = re.compile(
+    r"^localhost(?::\d+)?(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
 
 
 class LinkdingPlugin(Plugin):
@@ -266,7 +282,14 @@ class LinkdingPlugin(Plugin):
             self.max_results = int(value) if value and value.strip().isdigit() else 10
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
-        raw_search = query.search or ""
+        if query.type == QueryType.SELECTION:
+            raw_search = (
+                query.selection.text
+                if query.selection and query.selection.type == SelectionType.TEXT
+                else ""
+            )
+        else:
+            raw_search = query.search or ""
         search_text = raw_search.strip()
 
         if not search_text:
@@ -287,7 +310,8 @@ class LinkdingPlugin(Plugin):
 
         # Smart pattern recognition (ADR-0002)
         # URLs trigger bookmark creation; # prefixes trigger tag exploration
-        if re.match(r"^https?://", search_text, re.IGNORECASE):
+        url, _ = self._parse_url_and_tags(search_text)
+        if url:
             return await self._handle_url_input(ctx, search_text)
 
         if search_text.startswith("#"):
@@ -452,18 +476,41 @@ class LinkdingPlugin(Plugin):
 
         return _action
 
+    def _normalize_url(self, token: str) -> Optional[str]:
+        if re.match(r"^https?://", token, re.IGNORECASE):
+            return token
+        if LOCALHOST_REGEX.match(token) or token.startswith("127.0.0.1"):
+            if IPV4_REGEX.match(token) or LOCALHOST_REGEX.match(token):
+                return f"http://{token}"
+        if IPV4_REGEX.match(token) or DOMAIN_REGEX.match(token):
+            return f"https://{token}"
+        return None
+
     def _parse_url_and_tags(self, input_text: str) -> tuple[str, List[str]]:
         parts = input_text.strip().split()
         if not parts:
             return "", []
-        url = parts[0]
+
+        first = parts[0]
+        normalized = self._normalize_url(first)
+        if not normalized:
+            return "", []
+
+        is_explicit_scheme = bool(re.match(r"^https?://", first, re.IGNORECASE))
+        remaining = parts[1:]
+
         tags: List[str] = []
-        for p in parts[1:]:
-            if p.startswith("#") and len(p) > 1:
-                tag = p[1:].strip()
-                if tag and tag not in tags:
-                    tags.append(tag)
-        return url, tags
+        for p in remaining:
+            if p.startswith("#"):
+                if len(p) > 1:
+                    tag = p[1:].strip()
+                    if tag and tag not in tags:
+                        tags.append(tag)
+            else:
+                if not is_explicit_scheme:
+                    return "", []
+
+        return normalized, tags
 
     async def _handle_url_input(self, ctx: Context, search_text: str) -> QueryResponse:
         url, tags = self._parse_url_and_tags(search_text)

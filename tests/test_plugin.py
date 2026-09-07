@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from wox_plugin import Context, PluginInitParams, Query, QueryResponse, QueryType, Result, WoxImage, WoxImageType
+from wox_plugin import Context, PluginInitParams, Query, QueryResponse, QueryType, Result, SelectionType, WoxImage, WoxImageType
 from wox_plugin.models.query import QueryEnv, Selection
 
 
@@ -86,11 +86,14 @@ class TestPluginMetadata(unittest.TestCase):
         self.assertTrue(icon.startswith("svg:<svg"), "Icon must be an inline SVG string starting with 'svg:<svg'")
         self.assertIn("#5856e0", icon, "Icon must contain Linkding theme color")
 
-        # Debounce feature
+        # Features: debounce and querySelection
         features = meta.get("Features", [])
         debounce_features = [f for f in features if f.get("Name") == "debounce"]
         self.assertEqual(len(debounce_features), 1, "Debounce feature must be declared")
         self.assertEqual(debounce_features[0].get("Params", {}).get("IntervalMs"), 300)
+
+        query_selection_features = [f for f in features if f.get("Name") == "querySelection"]
+        self.assertEqual(len(query_selection_features), 1, "querySelection feature must be declared")
 
         # SettingDefinitions
         setting_defs = {s.get("Value", {}).get("Key"): s for s in meta.get("SettingDefinitions", [])}
@@ -541,6 +544,71 @@ class TestBookmarkCreationAndDuplicateCheck(unittest.IsolatedAsyncioTestCase):
         url, tags = self.plugin._parse_url_and_tags("https://example.com/docs#intro #python #python #dev")
         self.assertEqual(url, "https://example.com/docs#intro")
         self.assertEqual(tags, ["python", "dev"])
+
+        # Unprefixed URLs: domains (https)
+        url, tags = self.plugin._parse_url_and_tags("woxlauncher.com")
+        self.assertEqual(url, "https://woxlauncher.com")
+        self.assertEqual(tags, [])
+
+        url, tags = self.plugin._parse_url_and_tags("woxlauncher.com #dev #tool")
+        self.assertEqual(url, "https://woxlauncher.com")
+        self.assertEqual(tags, ["dev", "tool"])
+
+        url, tags = self.plugin._parse_url_and_tags("github.com/Wox-launcher/Wox")
+        self.assertEqual(url, "https://github.com/Wox-launcher/Wox")
+        self.assertEqual(tags, [])
+
+        # Unprefixed URLs: localhost and 127.0.0.1 (http)
+        url, tags = self.plugin._parse_url_and_tags("localhost:8080")
+        self.assertEqual(url, "http://localhost:8080")
+        self.assertEqual(tags, [])
+
+        url, tags = self.plugin._parse_url_and_tags("localhost:8080/api #local")
+        self.assertEqual(url, "http://localhost:8080/api")
+        self.assertEqual(tags, ["local"])
+
+        url, tags = self.plugin._parse_url_and_tags("127.0.0.1:8000")
+        self.assertEqual(url, "http://127.0.0.1:8000")
+        self.assertEqual(tags, [])
+
+        # Unprefixed URLs: other IPv4 (https)
+        url, tags = self.plugin._parse_url_and_tags("192.168.1.1:8080")
+        self.assertEqual(url, "https://192.168.1.1:8080")
+        self.assertEqual(tags, [])
+
+        # Negative cases: plain text, single words, version numbers, or trailing non-tag words
+        self.assertEqual(self.plugin._parse_url_and_tags("hello world"), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags("python sdk"), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags("wox"), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags("version 1.0.0"), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags("1.0.0"), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags("e.g."), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags("woxlauncher.com is great"), ("", []))
+        self.assertEqual(self.plugin._parse_url_and_tags(""), ("", []))
+
+    async def test_duplicate_check_unprefixed_url(self):
+        from unittest.mock import MagicMock, patch
+
+        check_data = {
+            "bookmark": None,
+            "metadata": {"title": "Wox Launcher"},
+            "auto_tags": [],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(check_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, self._make_query("woxlauncher.com #tool"))
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:prompt_save_bookmark")
+            self.assertEqual(res.sub_title, "https://woxlauncher.com · #tool")
+
+            # Check normalized URL was queried in Linkding check API
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fwoxlauncher.com", req.full_url)
 
     async def test_duplicate_check_already_bookmarked(self):
         from unittest.mock import MagicMock, patch
@@ -997,6 +1065,139 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
             response = await self.plugin.query(self.ctx, self._make_query("#"))
             self.assertEqual(len(response.results), 1)
             self.assertEqual(response.results[0].title, "i18n:error_network")
+
+
+
+class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+
+        self.mock_api = MockPublicAPI(initial_settings={
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+            "max_results": "10",
+        })
+        self.ctx = Context()
+        params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
+        await self.plugin.init(self.ctx, params)
+
+    def _make_selection_query(self, selection: Selection) -> Query:
+        return Query(
+            id="q_sel",
+            type=QueryType.SELECTION,
+            raw_query="",
+            selection=selection,
+            env=QueryEnv(),
+            trigger_keyword="",
+            command="",
+            search="",
+        )
+
+    async def test_selection_query_unprefixed_url(self):
+        from unittest.mock import MagicMock, patch
+
+        check_data = {
+            "bookmark": None,
+            "metadata": {"title": "Wox Launcher"},
+            "auto_tags": [],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(check_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        selection = Selection(type=SelectionType.TEXT, text="woxlauncher.com")
+        query = self._make_selection_query(selection)
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, query)
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:prompt_save_bookmark")
+            self.assertEqual(res.sub_title, "https://woxlauncher.com")
+
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fwoxlauncher.com", req.full_url)
+
+    async def test_selection_query_prefixed_url_with_tags(self):
+        from unittest.mock import MagicMock, patch
+
+        check_data = {
+            "bookmark": None,
+            "metadata": {"title": "Example Doc"},
+            "auto_tags": [],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(check_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        selection = Selection(type=SelectionType.TEXT, text="https://example.com/docs #docs #dev")
+        query = self._make_selection_query(selection)
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, query)
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:prompt_save_bookmark")
+            self.assertEqual(res.sub_title, "https://example.com/docs · #docs #dev")
+
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fexample.com%2Fdocs", req.full_url)
+
+    async def test_selection_query_plain_text_search(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_response_data = {
+            "count": 1,
+            "results": [
+                {
+                    "id": 1,
+                    "url": "https://woxlauncher.com",
+                    "title": "Wox Launcher",
+                    "website_title": "Wox Launcher Official",
+                    "tag_names": ["launcher"],
+                }
+            ],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        selection = Selection(type=SelectionType.TEXT, text="Wox launcher")
+        query = self._make_selection_query(selection)
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, query)
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "Wox Launcher")
+            self.assertEqual(res.sub_title, "https://woxlauncher.com · #launcher")
+
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/?q=Wox%20launcher&limit=10", req.full_url)
+
+    async def test_selection_query_non_text_or_empty(self):
+        # Empty text selection
+        query_empty = self._make_selection_query(Selection(type=SelectionType.TEXT, text="   "))
+        response = await self.plugin.query(self.ctx, query_empty)
+        self.assertEqual(len(response.results), 1)
+        self.assertEqual(response.results[0].title, "i18n:prompt_empty_search")
+
+        # File selection
+        query_file = self._make_selection_query(Selection(type=SelectionType.FILE, file_paths=["C:\\file.txt"]))
+        response_file = await self.plugin.query(self.ctx, query_file)
+        self.assertEqual(len(response_file.results), 1)
+        self.assertEqual(response_file.results[0].title, "i18n:prompt_empty_search")
 
 
 if __name__ == "__main__":
