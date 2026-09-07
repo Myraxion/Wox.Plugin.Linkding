@@ -3,7 +3,7 @@
 #   "Name": "i18n:plugin_name",
 #   "Description": "i18n:plugin_desc",
 #   "Author": "Myraxion",
-#   "Version": "1.0.0",
+#   "Version": "1.1.0",
 #   "MinWoxVersion": "2.4.2",
 #   "Runtime": "PYTHON",
 #   "Icon": "svg:<svg clip-rule=\"evenodd\" fill-rule=\"evenodd\" height=\"512\" stroke-linejoin=\"round\" stroke-miterlimit=\"1.5\" viewBox=\"0 0 512 512\" width=\"512\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"255.0164\" cy=\"254.9236\" fill=\"#5856e0\" r=\"224.78528\" stroke-width=\"1.18\"/><g fill=\"none\" stroke=\"#fff\" stroke-width=\"31.25\"><path d=\"m1244.39 1293.95v199.64s-.81 67.89 74.9 68.88c75.98.99 74.88-68.88 74.88-68.88v-199.64\" transform=\"matrix(.70710678 .70710678 -.70710678 .70710678 284.139117 -1684.198509)\"/><path d=\"m1244.39 1293.95v199.64s-.81 67.89 74.9 68.88c75.98.99 74.88-68.88 74.88-68.88v-199.64\" transform=\"matrix(-.70957074 -.70463421 .70463421 -.70957074 235.113139 2195.434643)\"/></g></svg>",
@@ -226,7 +226,7 @@ LINKDING_ICON_SVG = (
     '</g></svg>'
 )
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wox.Plugin.Linkding/1.0.0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wox.Plugin.Linkding/1.1.0"
 
 IPV4_REGEX = re.compile(
     r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?::\d+)?(?:[/?#].*)?$"
