@@ -40,7 +40,7 @@ class MockPublicAPI:
             "no_matching_tags": "No matching tags",
             "tag_action_select": "Filter bookmarks by this tag",
             "selection_bookmarks_found": "Linkding: {count} bookmarks found",
-            "selection_press_enter_to_expand": "Press Enter to expand bookmarks · Ctrl+J for more actions",
+            "selection_press_enter_to_search_web": "Press Enter to search in Linkding web · Ctrl+J for more actions",
             "selection_action_expand": "Expand Bookmark List",
         }
         self.copied_params = []
@@ -176,7 +176,7 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("no_matching_tags", i18n[lang])
             self.assertIn("tag_action_select", i18n[lang])
             self.assertIn("selection_bookmarks_found", i18n[lang])
-            self.assertIn("selection_press_enter_to_expand", i18n[lang])
+            self.assertIn("selection_press_enter_to_search_web", i18n[lang])
             self.assertIn("selection_action_expand", i18n[lang])
 
 
@@ -996,7 +996,6 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
 
             action = result.actions[0]
             self.assertTrue(action.is_default)
-            self.assertTrue(action.prevent_hide_after_action)
             await action.action(self.ctx, ActionContext())
 
             self.assertEqual(len(self.mock_api.changed_queries), 1)
@@ -1162,7 +1161,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(response.results), 1)
             res = response.results[0]
             self.assertEqual(res.title, "Linkding: 2 bookmarks found")
-            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_expand")
+            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_search_web")
 
             # 2. Split layout ratio 0.6
             self.assertIsNotNone(response.layout)
@@ -1179,22 +1178,21 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertIn("#launcher", first_item_tails)
             self.assertIn("#python", first_item_tails)
 
-            # 4. Actions: Enter (default) expands query to 'ld Wox launcher'
+            # 4. Actions: Enter (default) opens Linkding web search
             self.assertEqual(len(res.actions), 4)
-            expand_action = res.actions[0]
+            web_search_action = res.actions[0]
+            self.assertEqual(web_search_action.name, "i18n:action_open_in_linkding")
+            self.assertTrue(web_search_action.is_default)
+
+            # 5. Auxiliary actions: expand query, open first, copy url
+            expand_action = res.actions[1]
             self.assertEqual(expand_action.name, "i18n:selection_action_expand")
-            self.assertTrue(expand_action.is_default)
-            self.assertTrue(expand_action.prevent_hide_after_action)
+            self.assertFalse(expand_action.is_default)
             await expand_action.action(self.ctx, ActionContext())
             self.assertEqual(len(self.mock_api.changed_queries), 1)
             cq = self.mock_api.changed_queries[0]
             self.assertEqual(cq.query_type, QueryType.INPUT)
             self.assertEqual(cq.query_text, "ld Wox launcher")
-
-            # 5. Auxiliary actions: web search, open first, copy url
-            web_search_action = res.actions[1]
-            self.assertEqual(web_search_action.name, "i18n:action_open_in_linkding")
-            self.assertFalse(web_search_action.is_default)
 
             open_first_action = res.actions[2]
             self.assertEqual(open_first_action.name, "i18n:action_open_url")

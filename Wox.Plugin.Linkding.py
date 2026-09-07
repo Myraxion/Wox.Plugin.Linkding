@@ -53,7 +53,7 @@
 #       "no_matching_tags": "No matching tags",
 #       "tag_action_select": "Filter bookmarks by this tag",
 #       "selection_bookmarks_found": "Linkding: {count} bookmarks found",
-#       "selection_press_enter_to_expand": "Press Enter to expand bookmarks · Ctrl+J for more actions",
+#       "selection_press_enter_to_search_web": "Press Enter to search in Linkding web · Ctrl+J for more actions",
 #       "selection_action_expand": "Expand Bookmark List"
 #     },
 #     "zh_CN": {
@@ -88,7 +88,7 @@
 #       "no_matching_tags": "未找到匹配的标签",
 #       "tag_action_select": "按回车筛选此标签下的书签",
 #       "selection_bookmarks_found": "Linkding: 找到 {count} 个相关书签",
-#       "selection_press_enter_to_expand": "按回车展开书签列表 · Ctrl+J 更多操作",
+#       "selection_press_enter_to_search_web": "按回车在 Linkding 网页中搜索 · Ctrl+J 更多操作",
 #       "selection_action_expand": "展开书签列表"
 #     }
 #   },
@@ -625,20 +625,18 @@ class LinkdingPlugin(Plugin):
             title = f"Linkding: {count} bookmarks found"
 
         first_bm_url = raw_bookmarks[0].get("url", "")
-        clean_search_text = " ".join(search_text.split())
         actions = [
-            ResultAction(
-                name="i18n:selection_action_expand",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=True,
-                prevent_hide_after_action=True,
-                action=self._create_change_query_action(trigger_keyword, clean_search_text),
-            ),
             ResultAction(
                 name="i18n:action_open_in_linkding",
                 icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=False,
+                is_default=True,
                 action=self._create_open_url_action(web_search_url),
+            ),
+            ResultAction(
+                name="i18n:selection_action_expand",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=False,
+                action=self._create_change_query_action(trigger_keyword, search_text),
             ),
             ResultAction(
                 name="i18n:action_open_url",
@@ -658,7 +656,7 @@ class LinkdingPlugin(Plugin):
             results=[
                 Result(
                     title=title,
-                    sub_title="i18n:selection_press_enter_to_expand",
+                    sub_title="i18n:selection_press_enter_to_search_web",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     preview=preview,
                     actions=actions,
@@ -1065,7 +1063,6 @@ class LinkdingPlugin(Plugin):
                     name="i18n:tag_action_select",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     is_default=True,
-                    prevent_hide_after_action=True,
                     action=self._create_select_tag_action(tag, trigger),
                 ),
             ]

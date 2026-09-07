@@ -1,6 +1,6 @@
 # Consolidate Selection Query Matches into Single Aggregation Entry with Split Preview
 
-We decided to present matched bookmarks during Wox Selection Query as a single consolidated aggregation entry with a 0.4:0.6 split preview panel, rather than flooding the multi-plugin selection list with individual bookmark items. Pressing Enter expands the query into `ld <keyword>` for full interactive navigation.
+We decided to present matched bookmarks during Wox Selection Query as a single consolidated aggregation entry with a 0.4:0.6 split preview panel, rather than flooding the multi-plugin selection list with individual bookmark items. Pressing Enter opens search in the Linkding web interface, while the action panel (`Ctrl+J`) provides query expansion into `ld <keyword>` for full interactive navigation.
 
 ## Context & Problem Statement
 
@@ -16,10 +16,10 @@ Furthermore, Wox's preview panel (`WoxPreview`) is a read-only presentation view
 2. **Single aggregation entry with split preview (`WoxPreviewType.LIST`) & query expansion**:
    - Left list contains 1 entry (`Linkding: X bookmarks found`).
    - Right preview panel (ratio 0.6) renders structured items with titles, URLs, and tag badges (`tails`).
-   - Enter key triggers query expansion (`api.change_query("ld <keyword>")`) into Wox's dedicated single-plugin search mode.
-   - `Ctrl+J` action panel provides immediate access to open in web or open first match.
-   - *Pros*: Clean integration with global selection UI, instant visual feedback of matches, zero clutter, fluid drill-down.
-   - *Cons*: Opening a specific bookmark requires one extra Enter to expand into regular search mode.
+   - Enter key opens Linkding web search directly, consistent with no-match selection queries.
+   - `Ctrl+J` action panel provides immediate access to expand query (`api.change_query("ld <keyword>")`), open first match, or copy URL.
+   - *Pros*: Clean integration with global selection UI, instant visual feedback of matches, zero clutter, consistent Enter behavior across all selection queries.
+   - *Cons*: Opening a specific bookmark from launcher requires expanding via `Ctrl+J` or clicking.
 
 ## Decision
 
