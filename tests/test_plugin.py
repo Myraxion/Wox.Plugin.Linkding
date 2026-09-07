@@ -3,7 +3,24 @@ import json
 import unittest
 from pathlib import Path
 
-from wox_plugin import Context, PluginInitParams, Query, QueryResponse, QueryType, Result, SelectionType, WoxImage, WoxImageType
+from wox_plugin import (
+    Context,
+    PluginInitParams,
+    Query,
+    QueryLayout,
+    QueryResponse,
+    QueryType,
+    Result,
+    ResultTail,
+    ResultTailType,
+    SelectionType,
+    WoxImage,
+    WoxImageType,
+    WoxPreview,
+    WoxPreviewListData,
+    WoxPreviewListItem,
+    WoxPreviewType,
+)
 from wox_plugin.models.query import QueryEnv, Selection
 
 
@@ -22,6 +39,9 @@ class MockPublicAPI:
             "no_tags_found_sub": "No tags found in your Linkding instance",
             "no_matching_tags": "No matching tags",
             "tag_action_select": "Filter bookmarks by this tag",
+            "selection_bookmarks_found": "Linkding: {count} bookmarks found",
+            "selection_press_enter_to_expand": "Press Enter to expand bookmarks · Ctrl+J for more actions",
+            "selection_action_expand": "Expand Bookmark List",
         }
         self.copied_params = []
         self.notifications = []
@@ -155,6 +175,9 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("no_tags_found_sub", i18n[lang])
             self.assertIn("no_matching_tags", i18n[lang])
             self.assertIn("tag_action_select", i18n[lang])
+            self.assertIn("selection_bookmarks_found", i18n[lang])
+            self.assertIn("selection_press_enter_to_expand", i18n[lang])
+            self.assertIn("selection_action_expand", i18n[lang])
 
 
 class TestPluginLifecycle(unittest.IsolatedAsyncioTestCase):
@@ -1089,17 +1112,130 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
         await self.plugin.init(self.ctx, params)
 
-    def _make_selection_query(self, selection: Selection) -> Query:
+    def _make_selection_query(self, selection: Selection, trigger_keyword: str = "ld") -> Query:
         return Query(
             id="q_sel",
             type=QueryType.SELECTION,
             raw_query="",
             selection=selection,
             env=QueryEnv(),
-            trigger_keyword="",
+            trigger_keyword=trigger_keyword,
             command="",
             search="",
         )
+
+    async def test_selection_query_plain_text_search_aggregated(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        mock_response_data = {
+            "count": 2,
+            "results": [
+                {
+                    "id": 1,
+                    "url": "https://woxlauncher.com",
+                    "title": "Wox Launcher",
+                    "website_title": "Wox Launcher Official",
+                    "tag_names": ["launcher", "python"],
+                },
+                {
+                    "id": 2,
+                    "url": "https://github.com/Wox-launcher/Wox",
+                    "title": "Wox GitHub",
+                    "website_title": "GitHub Repo",
+                    "tag_names": ["oss"],
+                },
+            ],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        selection = Selection(type=SelectionType.TEXT, text="Wox launcher")
+        query = self._make_selection_query(selection)
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+            response = await self.plugin.query(self.ctx, query)
+
+            # 1. Consolidated single aggregation item
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "Linkding: 2 bookmarks found")
+            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_expand")
+
+            # 2. Split layout ratio 0.6
+            self.assertIsNotNone(response.layout)
+            self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
+
+            # 3. Native List preview with tags in tails
+            self.assertEqual(res.preview.preview_type, WoxPreviewType.LIST)
+            preview_dict = json.loads(res.preview.preview_data)
+            items = preview_dict.get("items", [])
+            self.assertEqual(len(items), 2)
+            self.assertEqual(items[0]["title"], "Wox Launcher")
+            self.assertEqual(items[0]["subtitle"], "https://woxlauncher.com")
+            first_item_tails = [t["Text"] for t in items[0].get("tails", [])]
+            self.assertIn("#launcher", first_item_tails)
+            self.assertIn("#python", first_item_tails)
+
+            # 4. Actions: Enter (default) expands query to 'ld Wox launcher'
+            self.assertEqual(len(res.actions), 4)
+            expand_action = res.actions[0]
+            self.assertEqual(expand_action.name, "i18n:selection_action_expand")
+            self.assertTrue(expand_action.is_default)
+            await expand_action.action(self.ctx, ActionContext())
+            self.assertEqual(len(self.mock_api.changed_queries), 1)
+            cq = self.mock_api.changed_queries[0]
+            self.assertEqual(cq.query_type, QueryType.INPUT)
+            self.assertEqual(cq.query_text, "ld Wox launcher")
+
+            # 5. Auxiliary actions: web search, open first, copy url
+            web_search_action = res.actions[1]
+            self.assertEqual(web_search_action.name, "i18n:action_open_in_linkding")
+            self.assertFalse(web_search_action.is_default)
+
+            open_first_action = res.actions[2]
+            self.assertEqual(open_first_action.name, "i18n:action_open_url")
+            self.assertFalse(open_first_action.is_default)
+
+            copy_url_action = res.actions[3]
+            self.assertEqual(copy_url_action.name, "i18n:action_copy_url")
+            self.assertFalse(copy_url_action.is_default)
+            await copy_url_action.action(self.ctx, ActionContext())
+            self.assertEqual(len(self.mock_api.copied_params), 1)
+            self.assertEqual(self.mock_api.copied_params[0].text, "https://woxlauncher.com")
+
+            req = mock_urlopen.call_args[0][0]
+            self.assertIn("/api/bookmarks/?q=Wox%20launcher&limit=10", req.full_url)
+
+    async def test_selection_query_no_bookmarks_found_guidance(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_response_data = {"count": 0, "results": []}
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        selection = Selection(type=SelectionType.TEXT, text="NonExistentTopic")
+        query = self._make_selection_query(selection)
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(self.ctx, query)
+
+            self.assertEqual(len(response.results), 1)
+            res = response.results[0]
+            self.assertEqual(res.title, "i18n:no_bookmarks_found")
+            self.assertEqual(res.sub_title, "i18n:no_bookmarks_found_sub")
+
+            # Split layout ratio 0.6 and List preview
+            self.assertIsNotNone(response.layout)
+            self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
+            self.assertEqual(res.preview.preview_type, WoxPreviewType.LIST)
+
+            # Default action opens Linkding web search
+            self.assertEqual(len(res.actions), 1)
+            self.assertEqual(res.actions[0].name, "i18n:action_open_in_linkding")
+            self.assertTrue(res.actions[0].is_default)
 
     async def test_selection_query_unprefixed_url(self):
         from unittest.mock import MagicMock, patch
@@ -1123,6 +1259,13 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             res = response.results[0]
             self.assertEqual(res.title, "i18n:prompt_save_bookmark")
             self.assertEqual(res.sub_title, "https://woxlauncher.com")
+
+            # Split layout 0.6 and Markdown preview
+            self.assertIsNotNone(response.layout)
+            self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
+            self.assertEqual(res.preview.preview_type, WoxPreviewType.MARKDOWN)
+            self.assertIn("### 🔖 保存书签至 Linkding", res.preview.preview_data)
+            self.assertIn("https://woxlauncher.com", res.preview.preview_data)
 
             req = mock_urlopen.call_args[0][0]
             self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fwoxlauncher.com", req.full_url)
@@ -1150,41 +1293,48 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.title, "i18n:prompt_save_bookmark")
             self.assertEqual(res.sub_title, "https://example.com/docs · #docs #dev")
 
+            # Split layout 0.6 and Markdown preview with tags
+            self.assertIsNotNone(response.layout)
+            self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
+            self.assertEqual(res.preview.preview_type, WoxPreviewType.MARKDOWN)
+            self.assertIn("#docs", res.preview.preview_data)
+            self.assertIn("#dev", res.preview.preview_data)
+
             req = mock_urlopen.call_args[0][0]
             self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fexample.com%2Fdocs", req.full_url)
 
-    async def test_selection_query_plain_text_search(self):
+    async def test_selection_query_existing_url(self):
         from unittest.mock import MagicMock, patch
 
-        mock_response_data = {
-            "count": 1,
-            "results": [
-                {
-                    "id": 1,
-                    "url": "https://woxlauncher.com",
-                    "title": "Wox Launcher",
-                    "website_title": "Wox Launcher Official",
-                    "tag_names": ["launcher"],
-                }
-            ],
+        check_data = {
+            "bookmark": {
+                "id": 10,
+                "url": "https://example.com/existing",
+                "title": "Existing Doc",
+                "tag_names": ["fav", "tools"],
+            }
         }
         mock_http_response = MagicMock()
-        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.read.return_value = json.dumps(check_data).encode("utf-8")
         mock_http_response.__enter__.return_value = mock_http_response
 
-        selection = Selection(type=SelectionType.TEXT, text="Wox launcher")
+        selection = Selection(type=SelectionType.TEXT, text="https://example.com/existing")
         query = self._make_selection_query(selection)
 
-        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
             response = await self.plugin.query(self.ctx, query)
 
             self.assertEqual(len(response.results), 1)
             res = response.results[0]
-            self.assertEqual(res.title, "Wox Launcher")
-            self.assertEqual(res.sub_title, "https://woxlauncher.com · #launcher")
+            self.assertEqual(res.title, "Existing Doc")
 
-            req = mock_urlopen.call_args[0][0]
-            self.assertIn("/api/bookmarks/?q=Wox%20launcher&limit=10", req.full_url)
+            # Split layout 0.6 and Markdown preview for duplicate bookmark
+            self.assertIsNotNone(response.layout)
+            self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
+            self.assertEqual(res.preview.preview_type, WoxPreviewType.MARKDOWN)
+            self.assertIn("### ⚠️ 该 URL 已收藏", res.preview.preview_data)
+            self.assertIn("Existing Doc", res.preview.preview_data)
+            self.assertIn("#fav", res.preview.preview_data)
 
     async def test_selection_query_non_text_or_empty(self):
         # Empty text selection
@@ -1192,12 +1342,49 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         response = await self.plugin.query(self.ctx, query_empty)
         self.assertEqual(len(response.results), 1)
         self.assertEqual(response.results[0].title, "i18n:prompt_empty_search")
+        self.assertIsNotNone(response.layout)
+        self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
 
         # File selection
         query_file = self._make_selection_query(Selection(type=SelectionType.FILE, file_paths=["C:\\file.txt"]))
         response_file = await self.plugin.query(self.ctx, query_file)
         self.assertEqual(len(response_file.results), 1)
         self.assertEqual(response_file.results[0].title, "i18n:prompt_empty_search")
+        self.assertIsNotNone(response_file.layout)
+        self.assertEqual(response_file.layout.result_preview_width_ratio, 0.6)
+
+    async def test_regular_input_query_maintains_flat_and_no_preview_ratio(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_response_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "url": "https://wox1.com", "title": "Wox 1", "tag_names": []},
+                {"id": 2, "url": "https://wox2.com", "title": "Wox 2", "tag_names": []},
+            ],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        input_query = Query(
+            id="q_input",
+            type=QueryType.INPUT,
+            raw_query="ld wox",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="wox",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(self.ctx, input_query)
+            # Regular input returns multiple flat results
+            self.assertEqual(len(response.results), 2)
+            # Layout ratio should NOT be set (None or no layout)
+            if response.layout is not None:
+                self.assertIsNone(response.layout.result_preview_width_ratio)
 
 
 if __name__ == "__main__":

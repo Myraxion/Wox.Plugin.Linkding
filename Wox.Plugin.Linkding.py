@@ -51,7 +51,10 @@
 #       "no_tags_found": "No tags found",
 #       "no_tags_found_sub": "No tags found in your Linkding instance",
 #       "no_matching_tags": "No matching tags",
-#       "tag_action_select": "Filter bookmarks by this tag"
+#       "tag_action_select": "Filter bookmarks by this tag",
+#       "selection_bookmarks_found": "Linkding: {count} bookmarks found",
+#       "selection_press_enter_to_expand": "Press Enter to expand bookmarks · Ctrl+J for more actions",
+#       "selection_action_expand": "Expand Bookmark List"
 #     },
 #     "zh_CN": {
 #       "plugin_name": "Linkding",
@@ -83,7 +86,10 @@
 #       "no_tags_found": "未找到标签",
 #       "no_tags_found_sub": "Linkding 实例中暂无标签",
 #       "no_matching_tags": "未找到匹配的标签",
-#       "tag_action_select": "按回车筛选此标签下的书签"
+#       "tag_action_select": "按回车筛选此标签下的书签",
+#       "selection_bookmarks_found": "Linkding: 找到 {count} 个相关书签",
+#       "selection_press_enter_to_expand": "按回车展开书签列表 · Ctrl+J 更多操作",
+#       "selection_action_expand": "展开书签列表"
 #     }
 #   },
 #   "SettingDefinitions": [
@@ -193,12 +199,19 @@ from wox_plugin import (
     PluginInitParams,
     PublicAPI,
     Query,
+    QueryLayout,
     QueryResponse,
     QueryType,
     Result,
     ResultAction,
+    ResultTail,
+    ResultTailType,
     SelectionType,
     WoxImage,
+    WoxPreview,
+    WoxPreviewListData,
+    WoxPreviewListItem,
+    WoxPreviewType,
 )
 
 LINKDING_ICON_SVG = (
@@ -282,7 +295,8 @@ class LinkdingPlugin(Plugin):
             self.max_results = int(value) if value and value.strip().isdigit() else 10
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
-        if query.type == QueryType.SELECTION:
+        is_selection = query.type == QueryType.SELECTION
+        if is_selection:
             raw_search = (
                 query.selection.text
                 if query.selection and query.selection.type == SelectionType.TEXT
@@ -298,6 +312,7 @@ class LinkdingPlugin(Plugin):
                 if self.linkding_url
                 else "i18n:prompt_empty_search"
             )
+            layout = QueryLayout(result_preview_width_ratio=0.6) if is_selection else QueryLayout()
             return QueryResponse(
                 results=[
                     Result(
@@ -305,22 +320,28 @@ class LinkdingPlugin(Plugin):
                         sub_title=sub_title,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     )
-                ]
+                ],
+                layout=layout,
             )
 
         # Smart pattern recognition (ADR-0002)
         # URLs trigger bookmark creation; # prefixes trigger tag exploration
         url, _ = self._parse_url_and_tags(search_text)
         if url:
+            if is_selection:
+                return await self._handle_url_input(ctx, search_text, is_selection=True)
             return await self._handle_url_input(ctx, search_text)
 
-        if search_text.startswith("#"):
+        if not is_selection and search_text.startswith("#"):
             tag_content = search_text[1:]
             # If no tag name yet (e.g. '#' or '# '), or no trailing space and no space after tag name (e.g. '#dev')
             if not tag_content or (not raw_search.endswith(" ") and " " not in tag_content):
                 return await self._handle_tag_browsing(ctx, query, tag_content)
             else:
                 return await self._search_bookmarks(ctx, search_text)
+
+        if is_selection:
+            return await self._handle_selection_bookmark_search(ctx, query, search_text)
 
         return await self._search_bookmarks(ctx, search_text)
 
@@ -458,6 +479,192 @@ class LinkdingPlugin(Plugin):
 
         return QueryResponse(results=results)
 
+    async def _handle_selection_bookmark_search(
+        self, ctx: Context, query: Query, search_text: str
+    ) -> QueryResponse:
+        layout = QueryLayout(result_preview_width_ratio=0.6)
+        encoded_q = urllib.parse.quote(search_text)
+        req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={self.max_results}"
+        req = self._create_request(req_url)
+
+        try:
+            resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_auth_failed",
+                            sub_title="i18n:error_auth_failed_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ],
+                    layout=layout,
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title=f"Linkding API Error (HTTP {e.code})",
+                        sub_title=str(e.reason),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ],
+                layout=layout,
+            )
+        except urllib.error.URLError as e:
+            reason_str = str(e.reason)
+            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
+                return QueryResponse(
+                    results=[
+                        Result(
+                            title="i18n:error_timeout",
+                            sub_title="i18n:error_timeout_sub",
+                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        )
+                    ],
+                    layout=layout,
+                )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_network",
+                        sub_title=reason_str,
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ],
+                layout=layout,
+            )
+        except TimeoutError:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:error_timeout",
+                        sub_title="i18n:error_timeout_sub",
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ],
+                layout=layout,
+            )
+        except Exception as e:
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="Error searching bookmarks",
+                        sub_title=str(e),
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    )
+                ],
+                layout=layout,
+            )
+
+        raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
+        web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
+        trigger_keyword = query.trigger_keyword or "ld"
+
+        if not raw_bookmarks:
+            empty_item = WoxPreviewListItem(
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                title="i18n:no_bookmarks_found",
+                subtitle="i18n:no_bookmarks_found_sub",
+            )
+            preview = WoxPreview(
+                preview_type=WoxPreviewType.LIST,
+                preview_data=WoxPreviewListData(items=[empty_item]).to_json(),
+            )
+            return QueryResponse(
+                results=[
+                    Result(
+                        title="i18n:no_bookmarks_found",
+                        sub_title="i18n:no_bookmarks_found_sub",
+                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        preview=preview,
+                        actions=[
+                            ResultAction(
+                                name="i18n:action_open_in_linkding",
+                                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                                is_default=True,
+                                action=self._create_open_url_action(web_search_url),
+                            )
+                        ],
+                    )
+                ],
+                layout=layout,
+            )
+
+        preview_items: List[WoxPreviewListItem] = []
+        for bm in raw_bookmarks[: self.max_results]:
+            tails = [
+                ResultTail(type=ResultTailType.TEXT, text=f"#{t}")
+                for t in bm.get("tag_names", [])
+            ]
+            bm_title = bm.get("title") or bm.get("website_title") or bm.get("url") or ""
+            bm_url = bm.get("url", "")
+            preview_items.append(
+                WoxPreviewListItem(
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    title=bm_title,
+                    subtitle=bm_url,
+                    tails=tails,
+                )
+            )
+
+        preview = WoxPreview(
+            preview_type=WoxPreviewType.LIST,
+            preview_data=WoxPreviewListData(items=preview_items).to_json(),
+        )
+
+        found_template = (
+            await self.api.get_translation(ctx, "selection_bookmarks_found")
+            if self.api
+            else "Linkding: {count} bookmarks found"
+        )
+        count = len(raw_bookmarks)
+        try:
+            title = found_template.format(count=count)
+        except Exception:
+            title = f"Linkding: {count} bookmarks found"
+
+        first_bm_url = raw_bookmarks[0].get("url", "")
+        actions = [
+            ResultAction(
+                name="i18n:selection_action_expand",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=True,
+                action=self._create_change_query_action(trigger_keyword, search_text),
+            ),
+            ResultAction(
+                name="i18n:action_open_in_linkding",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=False,
+                action=self._create_open_url_action(web_search_url),
+            ),
+            ResultAction(
+                name="i18n:action_open_url",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=False,
+                action=self._create_open_url_action(first_bm_url),
+            ),
+            ResultAction(
+                name="i18n:action_copy_url",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                is_default=False,
+                action=self._create_copy_url_action(first_bm_url),
+            ),
+        ]
+
+        return QueryResponse(
+            results=[
+                Result(
+                    title=title,
+                    sub_title="i18n:selection_press_enter_to_expand",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    preview=preview,
+                    actions=actions,
+                )
+            ],
+            layout=layout,
+        )
+
     def _fetch_bookmarks_http(self, req: urllib.request.Request) -> Dict[str, Any]:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = resp.read()
@@ -473,6 +680,20 @@ class LinkdingPlugin(Plugin):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
             if self.api:
                 await self.api.copy(ctx, CopyParams(type=CopyType.TEXT, text=target_url))
+
+        return _action
+
+    def _create_change_query_action(self, trigger_keyword: str, search_text: str):
+        async def _action(ctx: Context, action_ctx: ActionContext) -> None:
+            if self.api:
+                kw = trigger_keyword or "ld"
+                await self.api.change_query(
+                    ctx,
+                    ChangeQueryParam(
+                        query_type=QueryType.INPUT,
+                        query_text=f"{kw} {search_text}",
+                    ),
+                )
 
         return _action
 
@@ -512,10 +733,13 @@ class LinkdingPlugin(Plugin):
 
         return normalized, tags
 
-    async def _handle_url_input(self, ctx: Context, search_text: str) -> QueryResponse:
+    async def _handle_url_input(
+        self, ctx: Context, search_text: str, is_selection: bool = False
+    ) -> QueryResponse:
+        layout = QueryLayout(result_preview_width_ratio=0.6) if is_selection else QueryLayout()
         url, tags = self._parse_url_and_tags(search_text)
         if not url:
-            return QueryResponse(results=[])
+            return QueryResponse(results=[], layout=layout)
 
         encoded_url = urllib.parse.quote(url, safe="")
         req_url = f"{self.linkding_url}/api/bookmarks/check/?url={encoded_url}"
@@ -532,7 +756,8 @@ class LinkdingPlugin(Plugin):
                             sub_title="i18n:error_auth_failed_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                         )
-                    ]
+                    ],
+                    layout=layout,
                 )
             return QueryResponse(
                 results=[
@@ -541,7 +766,8 @@ class LinkdingPlugin(Plugin):
                         sub_title=str(e.reason),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     )
-                ]
+                ],
+                layout=layout,
             )
         except urllib.error.URLError as e:
             reason_str = str(e.reason)
@@ -553,7 +779,8 @@ class LinkdingPlugin(Plugin):
                             sub_title="i18n:error_timeout_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                         )
-                    ]
+                    ],
+                    layout=layout,
                 )
             return QueryResponse(
                 results=[
@@ -562,7 +789,8 @@ class LinkdingPlugin(Plugin):
                         sub_title=reason_str,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     )
-                ]
+                ],
+                layout=layout,
             )
         except TimeoutError:
             return QueryResponse(
@@ -572,7 +800,8 @@ class LinkdingPlugin(Plugin):
                         sub_title="i18n:error_timeout_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     )
-                ]
+                ],
+                layout=layout,
             )
         except Exception as e:
             return QueryResponse(
@@ -582,7 +811,8 @@ class LinkdingPlugin(Plugin):
                         sub_title=str(e),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     )
-                ]
+                ],
+                layout=layout,
             )
 
         existing_bookmark = check_data.get("bookmark")
@@ -626,15 +856,31 @@ class LinkdingPlugin(Plugin):
                 ),
             ]
 
+            preview = WoxPreview()
+            if is_selection:
+                tags_md = " ".join(f"`#{t}`" for t in bm_tags) if bm_tags else "无"
+                md_content = (
+                    "### ⚠️ 该 URL 已收藏\n"
+                    f"- **标题**：{title}\n"
+                    f"- **网址**：`{url}`\n"
+                    f"- **已有标签**：{tags_md}"
+                )
+                preview = WoxPreview(
+                    preview_type=WoxPreviewType.MARKDOWN,
+                    preview_data=md_content,
+                )
+
             return QueryResponse(
                 results=[
                     Result(
                         title=title,
                         sub_title=sub_title,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        preview=preview,
                         actions=actions,
                     )
-                ]
+                ],
+                layout=layout,
             )
 
         # Not bookmarked yet: show prompt to save
@@ -655,15 +901,31 @@ class LinkdingPlugin(Plugin):
             ),
         ]
 
+        preview = WoxPreview()
+        if is_selection:
+            tags_md = " ".join(f"`#{t}`" for t in tags) if tags else "无"
+            md_content = (
+                "### 🔖 保存书签至 Linkding\n"
+                f"- **目标网址**：`{url}`\n"
+                f"- **标签**：{tags_md}\n"
+                "> 按 Enter 立即保存，Linkding 将在后台自动抓取网页标题和描述"
+            )
+            preview = WoxPreview(
+                preview_type=WoxPreviewType.MARKDOWN,
+                preview_data=md_content,
+            )
+
         return QueryResponse(
             results=[
                 Result(
                     title="i18n:prompt_save_bookmark",
                     sub_title=sub_title,
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    preview=preview,
                     actions=actions,
                 )
-            ]
+            ],
+            layout=layout,
         )
 
     def _create_save_bookmark_action(self, target_url: str, tags: List[str]):
