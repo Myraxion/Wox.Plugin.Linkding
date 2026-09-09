@@ -39,6 +39,7 @@ python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 - **External Boundary Mocking**: Mock only external HTTP calls at `urllib.request.urlopen`. Do not mock internal helper methods.
 - **Test Invariants**:
   - Valid queries return correct `Result` list structure, SVG icons, and action definitions.
+  - Results carry deterministic, semantic `id` values (`bookmark:<id>`, `tag:<name>`, `prompt:*`, `error:*`).
   - In-memory tag cache enforces 300-second TTL and lazily refreshes.
   - Settings changes invalidate caches and update plugin state.
   - Network and HTTP errors map to user-friendly translated error results.
