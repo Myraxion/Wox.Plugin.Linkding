@@ -43,8 +43,27 @@ interface Query {
   TriggerKeyword: string;
   Command: string;
   Search: string;
+  Refinements?: { [id: string]: string }; // selected refinement values
 }
 ```
+
+### QueryRefinement
+
+Return refinements on `QueryResponse.Refinements`. Read selected values from `query.Refinements` on the next query. See `references/refinements.md`.
+
+```typescript
+interface QueryRefinement {
+  Id: string;
+  Title: string;
+  Type: "singleSelect" | "multiSelect" | "toggle" | "sort";
+  Options: QueryRefinementOption[];
+  DefaultValue?: string[];
+  Hotkey: string; // cmd+t on macOS, ctrl+t on Windows/Linux
+  Persist?: boolean;
+}
+```
+
+`Hotkey` must be a real platform chord: `cmd+<key>` on macOS and `ctrl+<key>` on Windows/Linux. Detect `process.platform === "darwin"` and emit the matching string. Do not write a literal `ctrl/cmd+t` token.
 
 ### Result
 
@@ -86,7 +105,7 @@ The `ctx` object is required for all API calls.
 
 ### General
 
-- `ChangeQuery(ctx, query: PlainQuery)`: Update the search bar text.
+- `ChangeQuery(ctx, query: ChangeQueryParam)`: Update the search bar text or provide a complete `QueryHint`.
 - `HideApp(ctx)`: Hide the Wox window.
 - `ShowApp(ctx)`: Show the Wox window.
 - `Notify(ctx, message)`: Display a system notification.
@@ -137,7 +156,7 @@ Prefer these APIs for all plugin settings. Values stored here can sync across ma
 - `OnGetDynamicSetting` is used together with a `dynamic` entry in `SettingDefinitions`.
 - Match runtime `SaveSetting(ctx, key, value, isPlatformSpecific)` calls to the setting metadata. Do not hardcode `false` for dynamically saved settings if their `SettingDefinitions` entry uses `IsPlatformSpecific: true`.
 - `DisabledInPlatforms` only controls where the setting is disabled; it does not isolate cloud-synced values.
-- Use static `QueryRequirements` in `plugin.json` when a query requires settings such as API keys. Wox blocks the query before calling `query()` and shows the built-in `query_requirement_settings` setup preview.
+- Use static `QueryRequirements` in `plugin.json` when a query requires settings such as API keys. Wox blocks the query before calling `query()` and shows only the built-in `query_requirement_settings` setup preview.
 - There is no runtime `register_query_requirements` API. Declare query requirements in metadata.
 
 ### QueryRequirements Types
@@ -212,3 +231,28 @@ class MyPlugin implements Plugin {
 }
 export const plugin = new MyPlugin();
 ```
+
+## Static HTML preview
+
+Use `webview` for inline HTML, including CSS. No HTTP server or temporary HTML file is needed; `html` is a payload field, not a preview type.
+
+```typescript
+import type { WoxPreview, WoxPreviewWebviewData } from "@wox-launcher/wox-plugin"
+
+const preview: WoxPreview = {
+  PreviewType: "webview",
+  PreviewData: JSON.stringify({
+    html: '<!doctype html><html><body><h1 style="color:teal">Hello Wox</h1></body></html>'
+  } satisfies WoxPreviewWebviewData)
+}
+// Assign preview to Result.Preview.
+```
+
+Set either `html` or `url`. Optional JSON fields are `injectCss`, `userAgent`, `cacheDisabled`, and `cacheKey` (defaults to the URL or HTML). Inline HTML has no plugin-relative base URL: embed CSS/images or use absolute resource URLs. This is browser content, not sanitized Markdown; escape untrusted text before interpolating it into HTML.
+
+## Structured query arguments and blocks
+
+See [QueryHint](../SKILL.md#queryhint) for `Commands[].Aliases`, suffix
+templates in `Commands[].QueryHint`, complete `ChangeQuery` instances, and
+SDK usage. `QueryHint` remains optional for `input` queries; do not
+embed markup in `QueryText` or infer argument boundaries from pasted text.

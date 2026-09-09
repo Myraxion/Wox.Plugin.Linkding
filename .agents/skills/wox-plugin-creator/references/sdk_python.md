@@ -36,6 +36,16 @@ class Query:
     trigger_keyword: str
     command: str
     search: str
+    refinements: dict[str, str]  # selected refinement values
+
+class QueryRefinement:
+    id: str
+    title: str
+    type: QueryRefinementType  # singleSelect | multiSelect | toggle | sort
+    hotkey: str  # cmd+t on macOS, ctrl+t on Windows/Linux
+    options: list[QueryRefinementOption]
+    default_value: list[str] = []
+    persist: bool = False
 
 class Result:
     title: str # Supports "i18n:key" prefix for auto-translation
@@ -54,6 +64,10 @@ class WoxImage:
     @classmethod
     def new_relative(cls, path: str) -> "WoxImage"
 ```
+
+Return refinements on `QueryResponse.refinements`. Read selected values from `query.refinements` on the next query. See `references/refinements.md`.
+
+`hotkey` must be a real platform chord: `cmd+<key>` on macOS and `ctrl+<key>` on Windows/Linux. Detect `sys.platform == "darwin"` and emit the matching string. Do not write a literal `ctrl/cmd+t` token.
 
 ## Public API Methods
 
@@ -117,7 +131,7 @@ Prefer these APIs for all plugin settings. Values stored here can sync across ma
 - For ready-to-copy advanced settings examples, read `references/settings_patterns.md`.
 - Match runtime `save_setting(ctx, key, value, is_platform_specific)` calls to the setting metadata. Do not hardcode `False` for dynamically saved settings if their `SettingDefinitions` entry uses `IsPlatformSpecific: true`.
 - `DisabledInPlatforms` only controls where the setting is disabled; it does not isolate cloud-synced values.
-- Use static `QueryRequirements` in `plugin.json` when a query requires settings such as API keys. Wox blocks the query before calling `query()` and shows the built-in `query_requirement_settings` setup preview.
+- Use static `QueryRequirements` in `plugin.json` when a query requires settings such as API keys. Wox blocks the query before calling `query()` and shows only the built-in `query_requirement_settings` setup preview.
 - There is no runtime `register_query_requirements` API. Declare query requirements in metadata.
 
 ## QueryRequirements Dataclasses
@@ -209,3 +223,29 @@ class HelloPlugin(Plugin):
 
 plugin = HelloPlugin()
 ```
+
+## Static HTML preview
+
+Use `WoxPreviewType.WEBVIEW` with a JSON-encoded `html` field. No HTTP server or temporary HTML file is needed; there is no separate `html` preview type.
+
+```python
+import json
+from wox_plugin import WoxPreview, WoxPreviewType
+
+preview = WoxPreview(
+    preview_type=WoxPreviewType.WEBVIEW,
+    preview_data=json.dumps({
+        "html": '<!doctype html><html><body><h1 style="color:teal">Hello Wox</h1></body></html>'
+    }),
+)
+# Assign preview to Result(preview=preview, ...).
+```
+
+Set either `html` or `url`. Optional JSON fields are `injectCss`, `userAgent`, `cacheDisabled`, and `cacheKey` (defaults to the URL or HTML). Inline HTML has no plugin-relative base URL: embed CSS/images or use absolute resource URLs. This is browser content, not sanitized Markdown; use `html.escape` for untrusted text before interpolation.
+
+## Structured query arguments and blocks
+
+See [QueryHint](../SKILL.md#queryhint) for `Commands[].Aliases`, suffix
+templates in `Commands[].QueryHint`, complete `ChangeQuery` instances, and
+SDK usage. `QueryHint` remains optional for `input` queries; do not
+embed markup in `QueryText` or infer argument boundaries from pasted text.

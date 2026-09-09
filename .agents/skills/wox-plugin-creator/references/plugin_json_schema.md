@@ -39,7 +39,7 @@ The `plugin.json` file must be a valid JSON object located in the root of your p
 
 ### QueryRequirements
 
-Use `QueryRequirements` when a plugin query cannot run until one or more settings are configured. Wox checks these requirements before calling the plugin `query()` method. If a requirement fails, Wox returns a system setup result with the `query_requirement_settings` preview and shows a focused settings form for only the missing fields.
+Use `QueryRequirements` when a plugin query cannot run until one or more settings are configured. Wox checks these requirements before calling the plugin `query()` method. If a requirement fails, Wox returns a system setup result with the `query_requirement_settings` preview and a zero preview-width ratio so plugin-scoped queries show only that focused settings form.
 
 Do not return a custom "please configure this plugin" result from `query()` for these cases. Static metadata gives grid results and normal list results the same setup flow.
 
@@ -324,6 +324,8 @@ Supported table column types include:
 
 - `text`
 - `textList`
+- `queryVariable`
+- `queryVariableList`
 - `checkbox`
 - `dirPath`
 - `select`
@@ -337,7 +339,8 @@ Table column notes:
 
 - `Validators` are supported on columns.
 - `SelectOptions` are only used when column type is `select`.
-- `TextMaxLines` is only used when column type is `text`.
+- `TextMaxLines` is only used when column type is `text`, `textList`, `queryVariable`, or `queryVariableList`.
+- `QueryVariableKind` selects the `{wox:...}` picker set for `queryVariable` and `queryVariableList` (`queryHotkey`, `aiCommand`, `dictation`, `webSearch`). Those fields show variable chips and open the picker when the user types `{`.
 - `HideInTable` hides the column in the list but keeps it in the edit dialog.
 - `HideInUpdate` hides the column in the edit dialog but keeps it in the list.
 
@@ -482,3 +485,10 @@ command defaults, while QueryResponse can choose the layout for each query.
   "Features": [{ "Name": "querySelection" }, { "Name": "debounce", "Params": { "IntervalMs": 200 } }]
 }
 ```
+
+## Structured query arguments and blocks
+
+See [QueryHint](../SKILL.md#queryhint) for `Commands[].Aliases`, suffix
+templates in `Commands[].QueryHint`, complete `ChangeQuery` instances, and
+SDK usage. `QueryHint` remains optional for `input` queries; do not
+embed markup in `QueryText` or infer argument boundaries from pasted text.

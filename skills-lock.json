@@ -149,7 +149,7 @@
       "source": "Wox-launcher/Wox",
       "sourceType": "github",
       "skillPath": ".agents/skills/wox-plugin-creator/SKILL.md",
-      "computedHash": "9c5a7a278edbe3815cf890632e6c6c584b6134ff143daaaab9e0ec20b56df078"
+      "computedHash": "820a0cefe729fb0ac9e4a61b7bd327c2cfba5e805618d2fc7484ce0cc4fef0d3"
     },
     "wox-plugin-submit2store": {
       "source": "Wox-launcher/Wox",
