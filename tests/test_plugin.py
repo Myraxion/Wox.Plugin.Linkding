@@ -42,10 +42,15 @@ class MockPublicAPI:
             "selection_bookmarks_found": "Linkding: {count} bookmarks found",
             "selection_press_enter_to_search_web": "Press Enter to search in Linkding web · Ctrl+J for more actions",
             "selection_action_expand": "Expand Bookmark List",
+            "toolbar_tags_found": "{count} tags found",
+            "toolbar_bookmarks_found": "{count} bookmarks found",
         }
         self.copied_params = []
         self.notifications = []
         self.changed_queries = []
+        self.leave_plugin_query_callbacks = []
+        self.toolbar_messages = []
+        self.cleared_toolbar_msg_ids = []
 
     async def get_setting(self, ctx: Context, key: str) -> str:
         return self.settings.get(key, "")
@@ -55,6 +60,9 @@ class MockPublicAPI:
 
     async def on_setting_changed(self, ctx: Context, callback) -> None:
         self.setting_changed_callbacks.append(callback)
+
+    async def on_leave_plugin_query(self, ctx: Context, callback) -> None:
+        self.leave_plugin_query_callbacks.append(callback)
 
     async def get_translation(self, ctx: Context, key: str) -> str:
         return self.translations.get(key, key)
@@ -67,6 +75,12 @@ class MockPublicAPI:
 
     async def change_query(self, ctx: Context, param) -> None:
         self.changed_queries.append(param)
+
+    async def show_toolbar_msg(self, ctx: Context, msg) -> None:
+        self.toolbar_messages.append(msg)
+
+    async def clear_toolbar_msg(self, ctx: Context, toolbar_msg_id: str) -> None:
+        self.cleared_toolbar_msg_ids.append(toolbar_msg_id)
 
 
 def extract_header_metadata(plugin_file_path: Path) -> dict:
@@ -178,6 +192,8 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("selection_bookmarks_found", i18n[lang])
             self.assertIn("selection_press_enter_to_search_web", i18n[lang])
             self.assertIn("selection_action_expand", i18n[lang])
+            self.assertIn("toolbar_tags_found", i18n[lang])
+            self.assertIn("toolbar_bookmarks_found", i18n[lang])
 
 
 class TestPluginLifecycle(unittest.IsolatedAsyncioTestCase):
@@ -347,7 +363,7 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
 
             q3 = self._make_query("#python")
             res3 = await self.plugin.query(self.ctx, q3)
-            mock_handle_tag.assert_called_with(self.ctx, q3, "python")
+            mock_handle_tag.assert_called_with(self.ctx, q3, "python", selected_tags=set(), raw_prefix="")
 
             mock_search.assert_not_called()
 
@@ -1089,6 +1105,214 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(response.results), 1)
             self.assertEqual(response.results[0].title, "i18n:error_network")
 
+    async def test_tag_browsing_subtitle_empty_and_prevent_hide(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {
+            "count": 1,
+            "results": [{"id": 1, "name": "github"}],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(len(response.results), 1)
+            result = response.results[0]
+            self.assertEqual(result.title, "#github")
+            # SubTitle must be empty string
+            self.assertEqual(result.sub_title, "")
+            # Action must have prevent_hide_after_action=True
+            self.assertTrue(result.actions[0].prevent_hide_after_action)
+
+    async def test_multi_tag_browsing_and_exclusion(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        bookmarks_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python"]},
+                {"id": 2, "url": "https://b.com", "title": "B", "tag_names": ["github", "python", "ai"]},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            # User types "ld #github #" -> enters tag browsing, excluding "github"
+            response = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            self.assertEqual(len(response.results), 2)
+            self.assertEqual(response.results[0].title, "#python")
+            self.assertEqual(response.results[1].title, "#ai")
+
+            # Selecting python appends to existing "#github " prefix and adds trailing space
+            action = response.results[0].actions[0]
+            self.assertTrue(action.prevent_hide_after_action)
+            await action.action(self.ctx, ActionContext())
+
+            self.assertEqual(len(self.mock_api.changed_queries), 1)
+            self.assertEqual(self.mock_api.changed_queries[0].query_text, "ld #github #python ")
+
+    async def test_multi_tag_browsing_with_prefix(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        bookmarks_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python", "pytest"]},
+                {"id": 2, "url": "https://b.com", "title": "B", "tag_names": ["github", "python", "ai"]},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            # User types "ld #github #py" -> enters tag browsing with prefix "py", excluding "github"
+            response = await self.plugin.query(self.ctx, self._make_query("#github #py"))
+            self.assertEqual(len(response.results), 2)
+            self.assertEqual(response.results[0].title, "#python")
+            self.assertEqual(response.results[1].title, "#pytest")
+
+            action = response.results[0].actions[0]
+            await action.action(self.ctx, ActionContext())
+
+            self.assertEqual(len(self.mock_api.changed_queries), 1)
+            self.assertEqual(self.mock_api.changed_queries[0].query_text, "ld #github #python ")
+
+    async def test_toolbar_msg_lifecycle(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "name": "dev"},
+                {"id": 2, "name": "design"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        # 1. Tag browsing shows matching tags count
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertTrue(len(self.mock_api.toolbar_messages) > 0)
+            latest_msg = self.mock_api.toolbar_messages[-1]
+            self.assertEqual(latest_msg.id, "linkding:status")
+            self.assertEqual(latest_msg.title, "2 tags found")
+
+        # 2. Bookmark search shows matching bookmarks count
+        bookmarks_data = {
+            "count": 42,
+            "results": [{"id": 1, "url": "https://example.com", "title": "Example"}],
+        }
+        mock_bm_resp = MagicMock()
+        mock_bm_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_bm_resp.__enter__.return_value = mock_bm_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_bm_resp):
+            await self.plugin.query(self.ctx, self._make_query("example"))
+            latest_msg = self.mock_api.toolbar_messages[-1]
+            self.assertEqual(latest_msg.id, "linkding:status")
+            self.assertEqual(latest_msg.title, "42 bookmarks found")
+
+        # 3. Empty query clears toolbar msg
+        await self.plugin.query(self.ctx, self._make_query(""))
+        self.assertIn("linkding:status", self.mock_api.cleared_toolbar_msg_ids)
+
+        # 4. On leaving plugin query clears toolbar msg
+        self.mock_api.cleared_toolbar_msg_ids.clear()
+        leave_callback = self.mock_api.leave_plugin_query_callbacks[0]
+        await leave_callback(self.ctx)
+        self.assertIn("linkding:status", self.mock_api.cleared_toolbar_msg_ids)
+
+    async def test_cooccurring_tags_filtering_and_exclusion(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python", "ai"]},
+                {"id": 2, "url": "https://b.com", "title": "B", "tag_names": ["github", "python", "backend"]},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            self.assertEqual(len(response.results), 3)
+            self.assertEqual(response.results[0].title, "#python")
+            self.assertEqual(len(response.results[0].tails), 1)
+            self.assertEqual(response.results[0].tails[0].text, "2")
+
+            titles = [r.title for r in response.results]
+            self.assertIn("#ai", titles)
+            self.assertIn("#backend", titles)
+            self.assertNotIn("#vue", titles)
+
+    async def test_cooccurring_tags_with_typing_prefix(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python", "pytest"]},
+                {"id": 2, "url": "https://b.com", "title": "B", "tag_names": ["github", "python", "ai"]},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#github #py"))
+            self.assertEqual(len(response.results), 2)
+            self.assertEqual(response.results[0].title, "#python")
+            self.assertEqual(response.results[1].title, "#pytest")
+
+    async def test_cooccurring_tags_prewarm_cache(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 1,
+            "results": [
+                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python"]},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp) as mock_urlopen:
+            await self.plugin.query(self.ctx, self._make_query("#github "))
+            self.assertEqual(mock_urlopen.call_count, 1)
+
+            res = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            self.assertEqual(len(res.results), 1)
+            self.assertEqual(res.results[0].title, "#python")
+            self.assertEqual(mock_urlopen.call_count, 1)
+
+    async def test_cooccurring_tags_empty_when_no_bookmarks(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {"count": 0, "results": []}
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#nonexistent #"))
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].title, "i18n:no_matching_tags")
+            self.assertEqual(self.mock_api.toolbar_messages[-1].title, "0 tags found")
+
 
 
 class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
@@ -1385,6 +1609,236 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             # Layout ratio should NOT be set (None or no layout)
             if response.layout is not None:
                 self.assertIsNone(response.layout.result_preview_width_ratio)
+
+
+class TestResultIdStabilityAndSemantics(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin_id_test", plugin_file)
+        assert spec is not None and spec.loader is not None
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin_id_test"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+        self.mock_api = MockPublicAPI(
+            {
+                "linkding_url": "https://linkding.test",
+                "api_token": "secret_token",
+                "max_results": "10",
+            }
+        )
+        self.ctx = Context()
+        await self.plugin.init(self.ctx, PluginInitParams(api=self.mock_api, plugin_directory="."))
+
+    async def test_empty_query_result_id(self):
+        query = Query(
+            id="q_empty",
+            type=QueryType.INPUT,
+            raw_query="ld",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="",
+        )
+        response = await self.plugin.query(self.ctx, query)
+        self.assertEqual(len(response.results), 1)
+        self.assertEqual(response.results[0].id, "prompt:empty")
+
+    async def test_bookmark_search_result_ids(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_response_data = {
+            "count": 2,
+            "results": [
+                {"id": 42, "url": "https://github.com", "title": "GitHub", "tag_names": ["git"]},
+                {"url": "https://python.org", "title": "Python", "tag_names": []},  # fallback without id
+            ],
+        }
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+
+        query = Query(
+            id="q_bm",
+            type=QueryType.INPUT,
+            raw_query="ld git",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="git",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(len(response.results), 2)
+            self.assertEqual(response.results[0].id, "bookmark:42")
+            self.assertEqual(response.results[1].id, "bookmark:https://python.org")
+
+    async def test_empty_bookmarks_and_error_result_ids(self):
+        from unittest.mock import MagicMock, patch
+        import urllib.error
+
+        # Empty bookmarks
+        mock_empty_resp = MagicMock()
+        mock_empty_resp.read.return_value = json.dumps({"count": 0, "results": []}).encode("utf-8")
+        mock_empty_resp.__enter__.return_value = mock_empty_resp
+
+        query = Query(
+            id="q_none",
+            type=QueryType.INPUT,
+            raw_query="ld notfound",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="notfound",
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_empty_resp):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].id, "bookmark:empty")
+
+        # Auth error
+        with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(response.results[0].id, "error:auth")
+
+        # Network error
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(response.results[0].id, "error:network")
+
+        # Timeout error
+        with patch("urllib.request.urlopen", side_effect=TimeoutError()):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(response.results[0].id, "error:timeout")
+
+    async def test_url_save_and_duplicate_result_ids(self):
+        from unittest.mock import MagicMock, patch
+
+        # Check existing bookmark
+        existing_data = {
+            "bookmark": {
+                "id": 99,
+                "url": "https://example.com",
+                "title": "Example",
+                "tag_names": ["web"],
+            }
+        }
+        mock_resp_exist = MagicMock()
+        mock_resp_exist.read.return_value = json.dumps(existing_data).encode("utf-8")
+        mock_resp_exist.__enter__.return_value = mock_resp_exist
+
+        query_exist = Query(
+            id="q_url1",
+            type=QueryType.INPUT,
+            raw_query="ld https://example.com",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="https://example.com",
+        )
+        with patch("urllib.request.urlopen", return_value=mock_resp_exist):
+            response = await self.plugin.query(self.ctx, query_exist)
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].id, "bookmark:99")
+
+        # Check non-existing (save prompt)
+        mock_resp_new = MagicMock()
+        mock_resp_new.read.return_value = json.dumps({"bookmark": None}).encode("utf-8")
+        mock_resp_new.__enter__.return_value = mock_resp_new
+
+        query_new = Query(
+            id="q_url2",
+            type=QueryType.INPUT,
+            raw_query="ld https://newsite.com",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="https://newsite.com",
+        )
+        with patch("urllib.request.urlopen", return_value=mock_resp_new):
+            response = await self.plugin.query(self.ctx, query_new)
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].id, "bookmark:save:https://newsite.com")
+
+    async def test_tag_browsing_result_ids(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {
+            "count": 2,
+            "results": [
+                {"id": 1, "name": "python"},
+                {"id": 2, "name": "linux"},
+            ],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        query_tag = Query(
+            id="q_tag",
+            type=QueryType.INPUT,
+            raw_query="ld #py",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="#py",
+        )
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            response = await self.plugin.query(self.ctx, query_tag)
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].id, "tag:python")
+
+        # No matching tag
+        query_notag = Query(
+            id="q_notag",
+            type=QueryType.INPUT,
+            raw_query="ld #nonexistent",
+            selection=None,
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="#nonexistent",
+        )
+        response_notag = await self.plugin.query(self.ctx, query_notag)
+        self.assertEqual(len(response_notag.results), 1)
+        self.assertEqual(response_notag.results[0].id, "tag:empty")
+
+    async def test_selection_query_aggregate_result_id(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_data = {
+            "count": 1,
+            "results": [{"id": 101, "url": "https://sel.com", "title": "Selected", "tag_names": []}],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mock_data).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        query = Query(
+            id="q_sel",
+            type=QueryType.SELECTION,
+            raw_query="",
+            selection=Selection(type=SelectionType.TEXT, text="sel keyword"),
+            env=QueryEnv(),
+            trigger_keyword="ld",
+            command="",
+            search="",
+        )
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(len(response.results), 1)
+            self.assertEqual(response.results[0].id, "selection:bookmarks")
 
 
 if __name__ == "__main__":

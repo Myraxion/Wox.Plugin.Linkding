@@ -31,3 +31,15 @@ _Avoid_: Detail window, right column, tooltip
 **Query Expansion**:
 The interaction of pressing Enter on an aggregation entry to populate the launcher search bar with `ld <keyword>` and immediately execute it as an interactive bookmark query.
 _Avoid_: Drill-down, sub-search, page jump
+
+**Result Identity**:
+A deterministic, namespaced identifier assigned to launcher results (`bookmark:<id>`, `tag:<name>`, etc.) that preserves item identity across query keystrokes and supports stateful launcher interactions.
+_Avoid_: Key, hash, temporary UUID, item index
+
+**Toolbar Status**:
+A transient status indicator displayed in the Wox launcher toolbar showing the total count of matched tags or bookmarks for the active query.
+_Avoid_: Status bar, bottom tooltip, counter badge
+
+**Co-occurring Tag**:
+A tag associated with one or more bookmarks in the currently filtered query subset, ensuring subsequent tag selections never yield zero results.
+_Avoid_: Related tag, sub-tag, candidate tag, child tag

@@ -3,7 +3,7 @@
 #   "Name": "i18n:plugin_name",
 #   "Description": "i18n:plugin_desc",
 #   "Author": "Myraxion",
-#   "Version": "1.1.0",
+#   "Version": "1.2.0",
 #   "MinWoxVersion": "2.4.2",
 #   "Runtime": "PYTHON",
 #   "Icon": "svg:<svg clip-rule=\"evenodd\" fill-rule=\"evenodd\" height=\"512\" stroke-linejoin=\"round\" stroke-miterlimit=\"1.5\" viewBox=\"0 0 512 512\" width=\"512\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"255.0164\" cy=\"254.9236\" fill=\"#5856e0\" r=\"224.78528\" stroke-width=\"1.18\"/><g fill=\"none\" stroke=\"#fff\" stroke-width=\"31.25\"><path d=\"m1244.39 1293.95v199.64s-.81 67.89 74.9 68.88c75.98.99 74.88-68.88 74.88-68.88v-199.64\" transform=\"matrix(.70710678 .70710678 -.70710678 .70710678 284.139117 -1684.198509)\"/><path d=\"m1244.39 1293.95v199.64s-.81 67.89 74.9 68.88c75.98.99 74.88-68.88 74.88-68.88v-199.64\" transform=\"matrix(-.70957074 -.70463421 .70463421 -.70957074 235.113139 2195.434643)\"/></g></svg>",
@@ -54,7 +54,9 @@
 #       "tag_action_select": "Filter bookmarks by this tag",
 #       "selection_bookmarks_found": "Linkding: {count} bookmarks found",
 #       "selection_press_enter_to_search_web": "Press Enter to search in Linkding web · Ctrl+J for more actions",
-#       "selection_action_expand": "Expand Bookmark List"
+#       "selection_action_expand": "Expand Bookmark List",
+#       "toolbar_tags_found": "{count} tags found",
+#       "toolbar_bookmarks_found": "{count} bookmarks found"
 #     },
 #     "zh_CN": {
 #       "plugin_name": "Linkding",
@@ -89,7 +91,9 @@
 #       "tag_action_select": "按回车筛选此标签下的书签",
 #       "selection_bookmarks_found": "Linkding: 找到 {count} 个相关书签",
 #       "selection_press_enter_to_search_web": "按回车在 Linkding 网页中搜索 · Ctrl+J 更多操作",
-#       "selection_action_expand": "展开书签列表"
+#       "selection_action_expand": "展开书签列表",
+#       "toolbar_tags_found": "共 {count} 个标签",
+#       "toolbar_bookmarks_found": "共 {count} 个书签"
 #     }
 #   },
 #   "SettingDefinitions": [
@@ -205,8 +209,10 @@ from wox_plugin import (
     Result,
     ResultAction,
     ResultTail,
+    ResultTailTextCategory,
     ResultTailType,
     SelectionType,
+    ToolbarMsg,
     WoxImage,
     WoxPreview,
     WoxPreviewListData,
@@ -226,7 +232,7 @@ LINKDING_ICON_SVG = (
     '</g></svg>'
 )
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wox.Plugin.Linkding/1.1.0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wox.Plugin.Linkding/1.2.0"
 
 IPV4_REGEX = re.compile(
     r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?::\d+)?(?:[/?#].*)?$"
@@ -250,6 +256,12 @@ class LinkdingPlugin(Plugin):
         self._tag_cache: Optional[List[str]] = None
         self._tag_cache_time: float = 0.0
         self.TAG_CACHE_TTL: float = 300.0
+        self._cooccurring_tag_cache: Dict[str, tuple[float, Dict[str, int]]] = {}
+        self.COOCCURRING_TAG_CACHE_TTL: float = 30.0
+        self._last_bookmark_query: str = ""
+        self._last_bookmarks: List[Dict[str, Any]] = []
+
+    TOOLBAR_MSG_ID = "linkding:status"
 
     def _create_request(
         self,
@@ -272,6 +284,8 @@ class LinkdingPlugin(Plugin):
     async def init(self, ctx: Context, params: PluginInitParams) -> None:
         self.api = params.api
         await self.api.on_setting_changed(ctx, self._on_setting_changed)
+        if hasattr(self.api, "on_leave_plugin_query"):
+            await self.api.on_leave_plugin_query(ctx, self._on_leave_plugin_query)
 
         raw_url = await self.api.get_setting(ctx, "linkding_url")
         self.linkding_url = raw_url.strip().rstrip("/") if raw_url else ""
@@ -282,17 +296,40 @@ class LinkdingPlugin(Plugin):
         raw_max = await self.api.get_setting(ctx, "max_results")
         self.max_results = int(raw_max) if raw_max and raw_max.strip().isdigit() else 10
 
+    async def _on_leave_plugin_query(self, ctx: Context) -> None:
+        await self._clear_status(ctx)
+
+    async def _show_status(self, ctx: Context, text: str) -> None:
+        if self.api and hasattr(self.api, "show_toolbar_msg"):
+            msg = ToolbarMsg(
+                id=self.TOOLBAR_MSG_ID,
+                title=text,
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+            )
+            await self.api.show_toolbar_msg(ctx, msg)
+
+    async def _clear_status(self, ctx: Context) -> None:
+        if self.api and hasattr(self.api, "clear_toolbar_msg"):
+            await self.api.clear_toolbar_msg(ctx, self.TOOLBAR_MSG_ID)
+
     async def _on_setting_changed(self, ctx: Context, key: str, value: str) -> None:
         if key == "linkding_url":
             self.linkding_url = value.strip().rstrip("/") if value else ""
             self._tag_cache = None
             self._tag_cache_time = 0.0
+            self._cooccurring_tag_cache.clear()
+            self._last_bookmark_query = ""
+            self._last_bookmarks = []
         elif key == "api_token":
             self.api_token = value.strip() if value else ""
             self._tag_cache = None
             self._tag_cache_time = 0.0
+            self._cooccurring_tag_cache.clear()
+            self._last_bookmark_query = ""
+            self._last_bookmarks = []
         elif key == "max_results":
             self.max_results = int(value) if value and value.strip().isdigit() else 10
+            self._cooccurring_tag_cache.clear()
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
         is_selection = query.type == QueryType.SELECTION
@@ -307,6 +344,7 @@ class LinkdingPlugin(Plugin):
         search_text = raw_search.strip()
 
         if not search_text:
+            await self._clear_status(ctx)
             sub_title = (
                 f"Linkding: {self.linkding_url}"
                 if self.linkding_url
@@ -316,6 +354,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="prompt:empty",
                         title="i18n:prompt_empty_search",
                         sub_title=sub_title,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -328,19 +367,37 @@ class LinkdingPlugin(Plugin):
         # URLs trigger bookmark creation; # prefixes trigger tag exploration
         url, _ = self._parse_url_and_tags(search_text)
         if url:
+            await self._clear_status(ctx)
             if is_selection:
                 return await self._handle_url_input(ctx, search_text, is_selection=True)
             return await self._handle_url_input(ctx, search_text)
 
-        if not is_selection and search_text.startswith("#"):
-            tag_content = search_text[1:]
-            # If no tag name yet (e.g. '#' or '# '), or no trailing space and no space after tag name (e.g. '#dev')
-            if not tag_content or (not raw_search.endswith(" ") and " " not in tag_content):
-                return await self._handle_tag_browsing(ctx, query, tag_content)
-            else:
-                return await self._search_bookmarks(ctx, search_text)
+        if not is_selection:
+            tokens = raw_search.split()
+            is_typing_tag = False
+            tag_prefix = ""
+            selected_tags: set[str] = set()
+            raw_prefix = ""
+
+            if search_text == "#":
+                is_typing_tag = True
+                tag_prefix = ""
+                raw_prefix = ""
+            elif not raw_search.endswith(" ") and tokens and tokens[-1].startswith("#"):
+                is_typing_tag = True
+                last_token = tokens[-1]
+                tag_prefix = last_token[1:]
+                last_hash_idx = raw_search.rfind("#")
+                raw_prefix = raw_search[:last_hash_idx]
+                selected_tags = set(re.findall(r"#([^\s#]+)", raw_prefix))
+
+            if is_typing_tag:
+                return await self._handle_tag_browsing(
+                    ctx, query, tag_prefix, selected_tags=selected_tags, raw_prefix=raw_prefix
+                )
 
         if is_selection:
+            await self._clear_status(ctx)
             return await self._handle_selection_bookmark_search(ctx, query, search_text)
 
         return await self._search_bookmarks(ctx, search_text)
@@ -353,10 +410,12 @@ class LinkdingPlugin(Plugin):
         try:
             resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
         except urllib.error.HTTPError as e:
+            await self._clear_status(ctx)
             if e.code in (401, 403):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:auth",
                             title="i18n:error_auth_failed",
                             sub_title="i18n:error_auth_failed_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -366,6 +425,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:api",
                         title=f"Linkding API Error (HTTP {e.code})",
                         sub_title=str(e.reason),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -373,11 +433,13 @@ class LinkdingPlugin(Plugin):
                 ]
             )
         except urllib.error.URLError as e:
+            await self._clear_status(ctx)
             reason_str = str(e.reason)
             if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:timeout",
                             title="i18n:error_timeout",
                             sub_title="i18n:error_timeout_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -387,6 +449,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:network",
                         title="i18n:error_network",
                         sub_title=reason_str,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -394,9 +457,11 @@ class LinkdingPlugin(Plugin):
                 ]
             )
         except TimeoutError:
+            await self._clear_status(ctx)
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:timeout",
                         title="i18n:error_timeout",
                         sub_title="i18n:error_timeout_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -404,9 +469,11 @@ class LinkdingPlugin(Plugin):
                 ]
             )
         except Exception as e:
+            await self._clear_status(ctx)
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:generic",
                         title="Error searching bookmarks",
                         sub_title=str(e),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -415,12 +482,23 @@ class LinkdingPlugin(Plugin):
             )
 
         raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
+        self._last_bookmark_query = search_text
+        self._last_bookmarks = raw_bookmarks
+        total_count = resp_data.get("count", len(raw_bookmarks))
+        bm_template = (
+            await self.api.get_translation(ctx, "toolbar_bookmarks_found")
+            if self.api
+            else "{count} bookmarks found"
+        )
+        await self._show_status(ctx, bm_template.format(count=total_count))
+
         web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
 
         if not raw_bookmarks:
             return QueryResponse(
                 results=[
                     Result(
+                        id="bookmark:empty",
                         title="i18n:no_bookmarks_found",
                         sub_title="i18n:no_bookmarks_found_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -438,6 +516,7 @@ class LinkdingPlugin(Plugin):
 
         results: List[Result] = []
         for item in raw_bookmarks:
+            bm_id = item.get("id")
             bm_url = item.get("url", "")
             title = item.get("title") or item.get("website_title") or bm_url
             tags = item.get("tag_names") or []
@@ -468,8 +547,10 @@ class LinkdingPlugin(Plugin):
                 ),
             ]
 
+            result_id = f"bookmark:{bm_id}" if bm_id is not None else f"bookmark:{bm_url}"
             results.append(
                 Result(
+                    id=result_id,
                     title=title,
                     sub_title=sub_title,
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -494,6 +575,7 @@ class LinkdingPlugin(Plugin):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:auth",
                             title="i18n:error_auth_failed",
                             sub_title="i18n:error_auth_failed_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -504,6 +586,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:api",
                         title=f"Linkding API Error (HTTP {e.code})",
                         sub_title=str(e.reason),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -517,6 +600,7 @@ class LinkdingPlugin(Plugin):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:timeout",
                             title="i18n:error_timeout",
                             sub_title="i18n:error_timeout_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -527,6 +611,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:network",
                         title="i18n:error_network",
                         sub_title=reason_str,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -538,6 +623,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:timeout",
                         title="i18n:error_timeout",
                         sub_title="i18n:error_timeout_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -549,6 +635,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:generic",
                         title="Error searching bookmarks",
                         sub_title=str(e),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -574,6 +661,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="bookmark:empty",
                         title="i18n:no_bookmarks_found",
                         sub_title="i18n:no_bookmarks_found_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -655,6 +743,7 @@ class LinkdingPlugin(Plugin):
         return QueryResponse(
             results=[
                 Result(
+                    id="selection:bookmarks",
                     title=title,
                     sub_title="i18n:selection_press_enter_to_search_web",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -752,6 +841,7 @@ class LinkdingPlugin(Plugin):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:auth",
                             title="i18n:error_auth_failed",
                             sub_title="i18n:error_auth_failed_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -762,6 +852,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:api",
                         title=f"Linkding API Error (HTTP {e.code})",
                         sub_title=str(e.reason),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -775,6 +866,7 @@ class LinkdingPlugin(Plugin):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:timeout",
                             title="i18n:error_timeout",
                             sub_title="i18n:error_timeout_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -785,6 +877,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:network",
                         title="i18n:error_network",
                         sub_title=reason_str,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -796,6 +889,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:timeout",
                         title="i18n:error_timeout",
                         sub_title="i18n:error_timeout_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -807,6 +901,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:generic",
                         title="Error checking bookmark",
                         sub_title=str(e),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -817,6 +912,8 @@ class LinkdingPlugin(Plugin):
 
         existing_bookmark = check_data.get("bookmark")
         if existing_bookmark:
+            existing_id = existing_bookmark.get("id")
+            result_id = f"bookmark:{existing_id}" if existing_id is not None else f"bookmark:{url}"
             title = (
                 existing_bookmark.get("title")
                 or existing_bookmark.get("website_title")
@@ -873,6 +970,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id=result_id,
                         title=title,
                         sub_title=sub_title,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -918,6 +1016,7 @@ class LinkdingPlugin(Plugin):
         return QueryResponse(
             results=[
                 Result(
+                    id=f"bookmark:save:{url}",
                     title="i18n:prompt_save_bookmark",
                     sub_title=sub_title,
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -964,16 +1063,57 @@ class LinkdingPlugin(Plugin):
         self._tag_cache_time = now
         return tags
 
+    async def _get_cooccurring_tags(self, ctx: Context, raw_prefix: str) -> Dict[str, int]:
+        prefix_query = raw_prefix.strip()
+        if not prefix_query:
+            return {}
+
+        now = time.time()
+        cached = self._cooccurring_tag_cache.get(prefix_query)
+        if cached is not None and (now - cached[0]) < self.COOCCURRING_TAG_CACHE_TTL:
+            return cached[1]
+
+        if self._last_bookmark_query == prefix_query and self._last_bookmarks:
+            bookmarks = self._last_bookmarks
+        else:
+            encoded_q = urllib.parse.quote(prefix_query)
+            req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit=100"
+            req = self._create_request(req_url)
+            resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+            bookmarks = resp_data.get("results", [])
+
+        tag_counts: Dict[str, int] = {}
+        for bm in bookmarks:
+            for tag in bm.get("tag_names", []):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        self._cooccurring_tag_cache[prefix_query] = (now, tag_counts)
+        return tag_counts
+
     async def _handle_tag_browsing(
-        self, ctx: Context, query: Query, tag_prefix: str
+        self,
+        ctx: Context,
+        query: Query,
+        tag_prefix: str,
+        selected_tags: Optional[set[str]] = None,
+        raw_prefix: str = "",
     ) -> QueryResponse:
+        is_cooccurring = bool(raw_prefix.strip())
+        tag_counts: Dict[str, int] = {}
+
         try:
-            tags = await self._get_tags(ctx)
+            if is_cooccurring:
+                tag_counts = await self._get_cooccurring_tags(ctx, raw_prefix)
+                tags = list(tag_counts.keys())
+            else:
+                tags = await self._get_tags(ctx)
         except urllib.error.HTTPError as e:
+            await self._clear_status(ctx)
             if e.code in (401, 403):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:auth",
                             title="i18n:error_auth_failed",
                             sub_title="i18n:error_auth_failed_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -983,6 +1123,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:api",
                         title=f"Linkding API Error (HTTP {e.code})",
                         sub_title=str(e.reason),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -990,11 +1131,13 @@ class LinkdingPlugin(Plugin):
                 ]
             )
         except urllib.error.URLError as e:
+            await self._clear_status(ctx)
             reason_str = str(e.reason)
             if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
                 return QueryResponse(
                     results=[
                         Result(
+                            id="error:timeout",
                             title="i18n:error_timeout",
                             sub_title="i18n:error_timeout_sub",
                             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -1004,6 +1147,7 @@ class LinkdingPlugin(Plugin):
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:network",
                         title="i18n:error_network",
                         sub_title=reason_str,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -1011,9 +1155,11 @@ class LinkdingPlugin(Plugin):
                 ]
             )
         except TimeoutError:
+            await self._clear_status(ctx)
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:timeout",
                         title="i18n:error_timeout",
                         sub_title="i18n:error_timeout_sub",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -1021,9 +1167,11 @@ class LinkdingPlugin(Plugin):
                 ]
             )
         except Exception as e:
+            await self._clear_status(ctx)
             return QueryResponse(
                 results=[
                     Result(
+                        id="error:generic",
                         title="Error fetching tags",
                         sub_title=str(e),
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -1031,23 +1179,40 @@ class LinkdingPlugin(Plugin):
                 ]
             )
 
+        selected_lower = {s.lower() for s in selected_tags} if selected_tags else set()
         if tag_prefix:
             prefix_lower = tag_prefix.lower()
-            matching_tags = [t for t in tags if t.lower().startswith(prefix_lower)]
+            filtered_tags = [
+                t for t in tags
+                if t.lower().startswith(prefix_lower) and t.lower() not in selected_lower
+            ]
         else:
-            matching_tags = list(tags)
+            filtered_tags = [t for t in tags if t.lower() not in selected_lower]
+
+        if is_cooccurring:
+            matching_tags = sorted(filtered_tags, key=lambda t: (-tag_counts.get(t, 0), t.lower()))
+        else:
+            matching_tags = filtered_tags
+
+        tags_template = (
+            await self.api.get_translation(ctx, "toolbar_tags_found")
+            if self.api
+            else "{count} tags found"
+        )
+        await self._show_status(ctx, tags_template.format(count=len(matching_tags)))
 
         if not matching_tags:
-            if not tags:
+            if not is_cooccurring and not tags:
                 title = "i18n:no_tags_found"
                 sub_title = "i18n:no_tags_found_sub"
             else:
                 title = "i18n:no_matching_tags"
-                sub_title = f"#{tag_prefix}"
+                sub_title = f"{raw_prefix}#{tag_prefix}" if is_cooccurring else f"#{tag_prefix}"
 
             return QueryResponse(
                 results=[
                     Result(
+                        id="tag:empty",
                         title=title,
                         sub_title=sub_title,
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
@@ -1063,21 +1228,34 @@ class LinkdingPlugin(Plugin):
                     name="i18n:tag_action_select",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     is_default=True,
-                    action=self._create_select_tag_action(tag, trigger),
+                    prevent_hide_after_action=True,
+                    action=self._create_select_tag_action(tag, trigger, raw_prefix),
                 ),
             ]
+            tails: List[ResultTail] = []
+            if is_cooccurring and tag in tag_counts:
+                tails.append(
+                    ResultTail(
+                        type=ResultTailType.TEXT,
+                        text=str(tag_counts[tag]),
+                        text_category=ResultTailTextCategory.DEFAULT,
+                    )
+                )
+
             results.append(
                 Result(
+                    id=f"tag:{tag}",
                     title=f"#{tag}",
-                    sub_title="i18n:tag_action_select",
+                    sub_title="",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    tails=tails,
                     actions=actions,
                 )
             )
 
         return QueryResponse(results=results)
 
-    def _create_select_tag_action(self, tag: str, trigger_keyword: str):
+    def _create_select_tag_action(self, tag: str, trigger_keyword: str, raw_prefix: str = ""):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
             if self.api:
                 kw = trigger_keyword or "ld"
@@ -1085,7 +1263,7 @@ class LinkdingPlugin(Plugin):
                     ctx,
                     ChangeQueryParam(
                         query_type=QueryType.INPUT,
-                        query_text=f"{kw} #{tag} ",
+                        query_text=f"{kw} {raw_prefix}#{tag} ",
                     ),
                 )
 
