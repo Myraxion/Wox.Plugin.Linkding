@@ -514,7 +514,7 @@ class LinkdingPlugin(Plugin):
                 ]
             )
 
-        total_count = len(raw_bookmarks)
+        page_count = len(raw_bookmarks)
         results: List[Result] = []
         for index, item in enumerate(raw_bookmarks):
             bm_id = item.get("id")
@@ -549,7 +549,7 @@ class LinkdingPlugin(Plugin):
             ]
 
             result_id = f"bookmark:{bm_id}" if bm_id is not None else f"bookmark:{bm_url}"
-            initial_score = float(total_count - index)
+            initial_score = float(page_count - index)
             results.append(
                 Result(
                     id=result_id,

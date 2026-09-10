@@ -1920,11 +1920,34 @@ class TestScoringStrategy(unittest.IsolatedAsyncioTestCase):
         with patch("urllib.request.urlopen", return_value=mock_http_resp):
             response = await self.plugin.query(self.ctx, self._make_query("bookmark"))
             results = response.results
-            self.assertEqual(len(results), 3)
             # Scores should be strictly descending to preserve API ranking in Wox
             self.assertGreater(results[0].score, results[1].score)
             self.assertGreater(results[1].score, results[2].score)
             self.assertGreaterEqual(results[2].score, 1.0)
+
+    async def test_global_tag_positional_scoring(self):
+        from unittest.mock import MagicMock, patch
+
+        tags_data = {
+            "count": 3,
+            "results": [
+                {"id": 1, "name": "tag-c"},
+                {"id": 2, "name": "tag-a"},
+                {"id": 3, "name": "tag-b"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(tags_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#"))
+            results = response.results
+            self.assertEqual(len(results), 3)
+            # Scores should be strictly descending to preserve API tag order in Wox
+            self.assertGreater(results[0].score, results[1].score)
+            self.assertGreater(results[1].score, results[2].score)
+            self.assertEqual(results[0].title, "#tag-c")
 
 
 if __name__ == "__main__":

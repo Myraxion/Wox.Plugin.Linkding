@@ -8,7 +8,8 @@ Furthermore, internal examination of Wox's `compareQueryResultCachesForDisplay` 
 
 To address this without disabling Wox's adaptive learning:
 1. **Co-occurring Tags**: Map associated bookmark counts directly to `Result.score = float(tag_counts[tag])`. Tags with higher counts naturally rank higher, and equal-count tags gracefully fall back to Wox's alphabetical tie-breaking.
-2. **Bookmarks**: Assign descending positional baseline scores (`score = float(len(raw_bookmarks) - index)`). This guarantees that initial/fresh search results faithfully preserve Linkding's server-side ranking (latest added or relevance), while allowing frequently actioned bookmarks to accumulate Wox's 7-day Fibonacci historical usage weights (+5 to +89 per action) and float toward the top.
+2. **Global Tags**: Assign descending positional baseline scores (`score = float(len(matching_tags) - index)`) to preserve the order returned by Linkding's tags API against arbitrary alphabetical shuffling.
+3. **Bookmarks**: Assign descending positional baseline scores (`score = float(len(raw_bookmarks) - index)`). This guarantees that initial/fresh search results faithfully preserve Linkding's server-side ranking (latest added or relevance), while allowing frequently actioned bookmarks to accumulate Wox's 7-day Fibonacci historical usage weights (+5 to +89 per action) and float toward the top.
 
 ## Considered Options
 
