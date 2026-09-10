@@ -1841,8 +1841,95 @@ class TestResultIdStabilityAndSemantics(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.results[0].id, "selection:bookmarks")
 
 
+class TestScoringStrategy(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+
+        self.mock_api = MockPublicAPI(initial_settings={
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+            "max_results": "10",
+        })
+        self.ctx = Context()
+        params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
+        await self.plugin.init(self.ctx, params)
+
+    def _make_query(self, search: str, trigger_keyword: str = "ld") -> Query:
+        raw_query = f"{trigger_keyword} {search}" if trigger_keyword else search
+        return Query(
+            id="q_scoring",
+            type=QueryType.INPUT,
+            raw_query=raw_query,
+            selection=Selection(),
+            env=QueryEnv(),
+            trigger_keyword=trigger_keyword,
+            command="",
+            search=search,
+        )
+
+    async def test_cooccurring_tag_frequency_score_mapping(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 3,
+            "results": [
+                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python", "ai"]},
+                {"id": 2, "url": "https://b.com", "title": "B", "tag_names": ["github", "python", "backend"]},
+                {"id": 3, "url": "https://c.com", "title": "C", "tag_names": ["github", "python"]},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            # python has frequency 3 -> score 3.0
+            # ai has frequency 1 -> score 1.0
+            # backend has frequency 1 -> score 1.0
+            results = response.results
+            self.assertEqual(len(results), 3)
+            self.assertEqual(results[0].title, "#python")
+            self.assertEqual(results[0].score, 3.0)
+            self.assertEqual(results[1].score, 1.0)
+            self.assertEqual(results[2].score, 1.0)
+
+    async def test_bookmark_search_positional_scoring(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 3,
+            "results": [
+                {"id": 10, "url": "https://latest.com", "title": "Latest Bookmark"},
+                {"id": 9, "url": "https://middle.com", "title": "Middle Bookmark"},
+                {"id": 8, "url": "https://oldest.com", "title": "Oldest Bookmark"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp):
+            response = await self.plugin.query(self.ctx, self._make_query("bookmark"))
+            results = response.results
+            self.assertEqual(len(results), 3)
+            # Scores should be strictly descending to preserve API ranking in Wox
+            self.assertGreater(results[0].score, results[1].score)
+            self.assertGreater(results[1].score, results[2].score)
+            self.assertGreaterEqual(results[2].score, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

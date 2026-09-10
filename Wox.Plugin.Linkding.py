@@ -514,8 +514,9 @@ class LinkdingPlugin(Plugin):
                 ]
             )
 
+        total_count = len(raw_bookmarks)
         results: List[Result] = []
-        for item in raw_bookmarks:
+        for index, item in enumerate(raw_bookmarks):
             bm_id = item.get("id")
             bm_url = item.get("url", "")
             title = item.get("title") or item.get("website_title") or bm_url
@@ -548,12 +549,14 @@ class LinkdingPlugin(Plugin):
             ]
 
             result_id = f"bookmark:{bm_id}" if bm_id is not None else f"bookmark:{bm_url}"
+            initial_score = float(total_count - index)
             results.append(
                 Result(
                     id=result_id,
                     title=title,
                     sub_title=sub_title,
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    score=initial_score,
                     actions=actions,
                 )
             )
@@ -1222,7 +1225,8 @@ class LinkdingPlugin(Plugin):
 
         trigger = query.trigger_keyword or "ld"
         results: List[Result] = []
-        for tag in matching_tags[: self.max_results]:
+        total_matching = len(matching_tags)
+        for index, tag in enumerate(matching_tags[: self.max_results]):
             actions = [
                 ResultAction(
                     name="i18n:tag_action_select",
@@ -1242,6 +1246,8 @@ class LinkdingPlugin(Plugin):
                     )
                 )
 
+            tag_score = float(tag_counts.get(tag, 0)) if is_cooccurring else float(total_matching - index)
+
             results.append(
                 Result(
                     id=f"tag:{tag}",
@@ -1249,6 +1255,7 @@ class LinkdingPlugin(Plugin):
                     sub_title="",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     tails=tails,
+                    score=tag_score,
                     actions=actions,
                 )
             )

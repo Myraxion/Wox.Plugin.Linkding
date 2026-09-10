@@ -1,13 +1,18 @@
-# Assign Stable Semantic Result IDs and Retain Wox Auto-Scoring
+# Assign Stable Semantic Result IDs and Retain Wox Auto-Scoring with Positional Baselines
 
-We decided to assign explicit, stable, and semantic `Result.id` attributes across all plugin query results, while keeping the plugin's initial result score at `0.0` and opting out of `ignoreAutoScore` (retaining Wox's native frequency-based auto-scoring).
+We decided to assign explicit, stable, and semantic `Result.id` attributes across all plugin query results, assign baseline initial scores (`Result.score`) for bookmarks and tags, and opt out of `ignoreAutoScore` (retaining Wox's native frequency-based auto-scoring).
 
 In Wox, leaving `Result.id` empty causes the launcher core to assign a newly generated random UUID to each item on every query stroke. This churn prevents cross-query identity tracking and makes dynamic result updates via `update_result` impossible. Assigning deterministic IDs (`bookmark:<id>`, `tag:<name>`, `prompt:*`, `error:*`) ensures stable entity identity across typing queries.
 
-Concurrently, we evaluated whether to declare the `ignoreAutoScore` feature or compute custom local relevance scores. Linkding is a search-oriented bookmark launcher where users frequently revisit a small subset of bookmarks. Retaining Wox's default auto-scoring allows the launcher to adapt to usage patterns (using time-decayed Fibonacci weights) so high-frequency bookmarks naturally float to the top, while initial zero scoring ensures strict adherence to Linkding's server-side ranking for new queries.
+Furthermore, internal examination of Wox's `compareQueryResultCachesForDisplay` reveals that Wox stores query results in a hash map and sorts them by `Result.Score` descending. When scores are equal (e.g. all 0.0), Wox falls back to `strings.Compare(a.Result.Title, b.Result.Title)` (ascending alphabetical sort). This fallback inadvertently destroyed Linkding's native order (newest-added bookmarks first, or API search relevance) and broke frequency-based co-occurring tag rankings.
+
+To address this without disabling Wox's adaptive learning:
+1. **Co-occurring Tags**: Map associated bookmark counts directly to `Result.score = float(tag_counts[tag])`. Tags with higher counts naturally rank higher, and equal-count tags gracefully fall back to Wox's alphabetical tie-breaking.
+2. **Bookmarks**: Assign descending positional baseline scores (`score = float(len(raw_bookmarks) - index)`). This guarantees that initial/fresh search results faithfully preserve Linkding's server-side ranking (latest added or relevance), while allowing frequently actioned bookmarks to accumulate Wox's 7-day Fibonacci historical usage weights (+5 to +89 per action) and float toward the top.
 
 ## Considered Options
 
-- **Omit `Result.id` and let Wox assign random UUIDs**: Simplest plugin code, but causes unstable item identity across query keystrokes and impedes stateful launcher interactions.
-- **Enable `ignoreAutoScore` and compute client-side relevance scores**: Forces strict sorting by plugin logic, but duplicates Linkding server-side fuzzy matching and disables Wox's adaptive learning for frequently used bookmarks.
-- **Assign stable semantic IDs and retain native Wox auto-scoring (chosen)**: Gives every item a deterministic, namespaced ID based on Linkding entities, preserves server-side API ranking as the baseline, and benefits from Wox's frequency-based learning for frequently launched bookmarks.
+- **Omit `Result.id` and keep initial score at 0.0**: Simplest code, but causes unstable item identity and triggers Wox's alphabetical Title sort fallback, wiping out Linkding's recency and relevance rankings.
+- **Enable `ignoreAutoScore` and compute client-side relevance scores**: Forces strict adherence to Linkding API results without any Wox intervention, but disables launcher-wide frequency learning for frequently revisited bookmarks.
+- **Assign stable semantic IDs, baseline positional scores, and retain native Wox auto-scoring (chosen)**: Gives every item a deterministic ID, preserves Linkding's server-side API ranking as the baseline via positional/frequency scores, and retains Wox's frequency-based learning for frequently launched bookmarks.
+

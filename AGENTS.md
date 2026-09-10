@@ -40,6 +40,7 @@ python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 - **Test Invariants**:
   - Valid queries return correct `Result` list structure, SVG icons, and action definitions.
   - Results carry deterministic, semantic `id` values (`bookmark:<id>`, `tag:<name>`, `prompt:*`, `error:*`).
+  - Results carry intentional baseline scores (co-occurring tags mapped from counts, bookmarks from descending positional ranks) to preserve API and frequency rankings against Wox alphabetical fallback.
   - In-memory tag cache enforces 300-second TTL and lazily refreshes.
   - Settings changes invalidate caches and update plugin state.
   - Network and HTTP errors map to user-friendly translated error results.
