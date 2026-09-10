@@ -1688,35 +1688,36 @@ class TestResultIdStabilityAndSemantics(unittest.IsolatedAsyncioTestCase):
         mock_empty_resp.read.return_value = json.dumps({"count": 0, "results": []}).encode("utf-8")
         mock_empty_resp.__enter__.return_value = mock_empty_resp
 
-        query = Query(
-            id="q_none",
-            type=QueryType.INPUT,
-            raw_query="ld notfound",
-            selection=None,
-            env=QueryEnv(),
-            trigger_keyword="ld",
-            command="",
-            search="notfound",
-        )
+        def _make_query(search_text: str) -> Query:
+            return Query(
+                id="q_none",
+                type=QueryType.INPUT,
+                raw_query=f"ld {search_text}",
+                selection=Selection(),
+                env=QueryEnv(),
+                trigger_keyword="ld",
+                command="",
+                search=search_text,
+            )
 
         with patch("urllib.request.urlopen", return_value=mock_empty_resp):
-            response = await self.plugin.query(self.ctx, query)
+            response = await self.plugin.query(self.ctx, _make_query("notfound"))
             self.assertEqual(len(response.results), 1)
             self.assertEqual(response.results[0].id, "bookmark:empty")
 
         # Auth error
         with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)):
-            response = await self.plugin.query(self.ctx, query)
+            response = await self.plugin.query(self.ctx, _make_query("auth_error"))
             self.assertEqual(response.results[0].id, "error:auth")
 
         # Network error
         with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
-            response = await self.plugin.query(self.ctx, query)
+            response = await self.plugin.query(self.ctx, _make_query("net_error"))
             self.assertEqual(response.results[0].id, "error:network")
 
         # Timeout error
         with patch("urllib.request.urlopen", side_effect=TimeoutError()):
-            response = await self.plugin.query(self.ctx, query)
+            response = await self.plugin.query(self.ctx, _make_query("timeout_error"))
             self.assertEqual(response.results[0].id, "error:timeout")
 
     async def test_url_save_and_duplicate_result_ids(self):
@@ -1948,6 +1949,101 @@ class TestScoringStrategy(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(results[0].score, results[1].score)
             self.assertGreater(results[1].score, results[2].score)
             self.assertEqual(results[0].title, "#tag-c")
+
+
+class TestBookmarkSearchCache(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib.util
+        import sys
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_plugin", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_plugin"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+
+        self.mock_api = MockPublicAPI(initial_settings={
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+            "max_results": "10",
+        })
+        self.ctx = Context()
+        params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
+        await self.plugin.init(self.ctx, params)
+
+    def _make_query(self, search: str, trigger_keyword: str = "ld") -> Query:
+        raw_query = f"{trigger_keyword} {search}" if trigger_keyword else search
+        return Query(
+            id="q_cache",
+            type=QueryType.INPUT,
+            raw_query=raw_query,
+            selection=Selection(),
+            env=QueryEnv(),
+            trigger_keyword=trigger_keyword,
+            command="",
+            search=search,
+        )
+
+    async def test_search_bookmarks_caches_responses_and_normalizes_whitespace(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 1,
+            "results": [
+                {"id": 1, "url": "https://example.com", "title": "Example Bookmark"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp) as mock_urlopen:
+            # First query performs network request
+            res1 = await self.plugin.query(self.ctx, self._make_query("github"))
+            self.assertEqual(mock_urlopen.call_count, 1)
+            self.assertEqual(len(res1.results), 1)
+
+            # Query with trailing space hits cache without network call
+            res2 = await self.plugin.query(self.ctx, self._make_query("github "))
+            self.assertEqual(mock_urlopen.call_count, 1)
+            self.assertEqual(len(res2.results), 1)
+            self.assertEqual(res2.results[0].id, "bookmark:1")
+
+            # Tag search ending with space also routes to bookmark search and caches
+            res3 = await self.plugin.query(self.ctx, self._make_query("#tag "))
+            self.assertEqual(mock_urlopen.call_count, 2)
+            self.assertEqual(len(res3.results), 1)
+
+            res4 = await self.plugin.query(self.ctx, self._make_query("#tag  "))
+            self.assertEqual(mock_urlopen.call_count, 2)
+            self.assertEqual(len(res4.results), 1)
+            self.assertEqual(res4.results[0].id, "bookmark:1")
+
+    async def test_search_bookmarks_cache_invalidates_on_setting_changed(self):
+        from unittest.mock import MagicMock, patch
+
+        bookmarks_data = {
+            "count": 1,
+            "results": [
+                {"id": 1, "url": "https://example.com", "title": "Example Bookmark"},
+            ],
+        }
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_http_resp) as mock_urlopen:
+            await self.plugin.query(self.ctx, self._make_query("test"))
+            self.assertEqual(mock_urlopen.call_count, 1)
+
+            # Change a setting
+            callback = self.mock_api.setting_changed_callbacks[0]
+            await callback(self.ctx, "api_token", "new_token")
+
+            # Subsequent query should trigger a new network call
+            await self.plugin.query(self.ctx, self._make_query("test"))
+            self.assertEqual(mock_urlopen.call_count, 2)
 
 
 if __name__ == "__main__":
