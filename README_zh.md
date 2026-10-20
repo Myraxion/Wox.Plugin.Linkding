@@ -88,6 +88,18 @@
 
 本项目使用标准 Python `unittest` 与 `mypy` 进行质量保证。
 
+### 配置开发环境
+
+Wox 在运行插件时提供 `wox_plugin`。本地导入、编辑器补全和测试需要在虚拟环境中安装 SDK 与类型检查工具（推荐 Python 3.12）：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\Activate.ps1
+```
+
+macOS/Linux 对应使用 `.venv/bin/python` 和 `source .venv/bin/activate`。如果 VS Code 已选择过其他解释器，请通过 **Python: Select Interpreter** 切换到本项目的 `.venv`；若仍显示缺失导入诊断，重新加载编辑器窗口。
+
 ### 运行全量测试套件
 
 ```bash

@@ -88,6 +88,18 @@
 
 This project uses standard Python `unittest` and `mypy` for quality assurance.
 
+### Set Up the Development Environment
+
+Wox supplies `wox_plugin` when running the plugin. For local imports, editor completion, and tests, install the SDK and type checker in a virtual environment (Python 3.12 recommended):
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\Activate.ps1
+```
+
+On macOS/Linux, use `.venv/bin/python` and `source .venv/bin/activate` instead. In VS Code, select the project's `.venv` through **Python: Select Interpreter** if an interpreter was already selected. Reload the editor window if the missing-import diagnostic persists.
+
 ### Run Full Test Suite
 
 ```bash

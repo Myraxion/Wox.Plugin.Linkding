@@ -1,0 +1,3 @@
+# Local development only; Wox supplies the SDK when running the plugin.
+wox-plugin==0.0.86
+mypy
