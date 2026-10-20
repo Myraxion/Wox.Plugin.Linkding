@@ -810,7 +810,13 @@ class LinkdingPlugin(Plugin):
 
         raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
         web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
-        trigger_keyword = query.trigger_keyword
+        trigger_keyword = query.trigger_keyword or "ld"
+        if not query.trigger_keyword and self.api:
+            # Resolve before returning the entry so Enter needs no settings read.
+            configured_keywords = json.loads(
+                await self.api.get_setting(ctx, "TriggerKeywords") or "[]"
+            )
+            trigger_keyword = next((keyword for keyword in configured_keywords if keyword != "*"), "ld")
         actions = [
             ResultAction(
                 name="i18n:selection_action_expand",
@@ -919,18 +925,11 @@ class LinkdingPlugin(Plugin):
     def _create_change_query_action(self, trigger_keyword: str, search_text: str):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
             if self.api:
-                kw = trigger_keyword
-                if not kw:
-                    # Unscoped selection queries do not carry a trigger keyword.
-                    configured_keywords = json.loads(
-                        await self.api.get_setting(ctx, "TriggerKeywords") or "[]"
-                    )
-                    kw = next((keyword for keyword in configured_keywords if keyword != "*"), "ld")
                 await self.api.change_query(
                     ctx,
                     ChangeQueryParam(
                         query_type=QueryType.INPUT,
-                        query_text=f"{kw} {search_text}",
+                        query_text=f"{trigger_keyword} {search_text}",
                     ),
                 )
 
