@@ -65,9 +65,13 @@ class WoxImage:
     def new_relative(cls, path: str) -> "WoxImage"
 ```
 
+Action icons should be theme-adaptive SVG (`svg:` / inline markup with `var(--wox-theme-icon-color)`), not emoji. See `references/icons.md`.
+
 Return refinements on `QueryResponse.refinements`. Read selected values from `query.refinements` on the next query. See `references/refinements.md`.
 
-`hotkey` must be a real platform chord: `cmd+<key>` on macOS and `ctrl+<key>` on Windows/Linux. Detect `sys.platform == "darwin"` and emit the matching string. Do not write a literal `ctrl/cmd+t` token.
+When assigned, refinement `hotkey` must be a real platform chord: `cmd+<key>` on macOS and `ctrl+<key>` on Windows/Linux. Detect `sys.platform == "darwin"` and emit the matching string. Do not write a literal `ctrl/cmd+t` token; an empty string leaves it unbound.
+
+`ResultAction.hotkey` is optional too. Before assigning either an action or refinement binding, read [built-in hotkeys and collisions](hotkeys.md). Prefer the platform primary modifier for action defaults, avoid duplicate bindings, and keep the action accessible through the Action Panel when leaving it unbound.
 
 ## Public API Methods
 
@@ -85,28 +89,46 @@ All methods are async and require `ctx`.
 
 ### Cache
 
-If the plugin needs on-disk cache, prefer `get_cache_folder` over any custom directory.
+On-disk cache goes in `get_cache_folder`. Do not store cache with `save_setting` or `set_setting`.
 
 - `get_cache_folder(ctx)`: Return `~/.wox/cache/plugins/<plugin-id>/`. Wox creates it if needed and deletes it on uninstall.
-- Call it once in `init()`, keep the path, and write downloads, thumbnails, and search-result files under it.
+- Call it once in `init()`, keep the path, and write downloads, thumbnails, fetched JSON, and other rebuildable snapshots under it.
+- Plugin setting writes are cloud-synced. A cache value saved as a setting is replicated on every change and fills sync history, even when the key is hidden from `SettingDefinitions`.
+- `is_local=True` keeps a small machine-local preference out of cloud sync. Do not use it as a cache store. `is_platform_specific` still syncs.
 - Do not invent `cache/`, `tmp/`, or `downloads/` next to the plugin file, under user data, or under a hardcoded folder name.
-- User preferences and favorites are settings, not cache. Use `get_setting` / `set_setting` for those.
+- User preferences, API keys, and favorites are settings. Use `get_setting` / `set_setting` for those.
+
+### Theme
+
+Requires Wox >= 2.4.5.
+
+- `get_theme_colors(ctx, option=None)`: Opaque `#RRGGBB` launcher colors for HTML/webview previews: `background`, `text`, `secondary_text`, `border`, `accent`, `accent_text`, `selection`, plus `dark`. Call this only when building HTML previews so light and dark Wox themes stay in sync. Markdown previews follow the launcher theme without this API.
 
 ### Settings
 
-Prefer these APIs for all plugin settings. Values stored here can sync across machines through Wox cloud sync. Do not persist ordinary settings in local files or a custom store.
+Prefer these APIs for user settings. A normal write syncs across machines through Wox cloud sync. Do not persist ordinary settings in local files or a custom store, and do not store cache here.
 
 - `get_setting(ctx, key)`: Get setting.
 - `save_setting(ctx, key, value, is_platform_specific)`: Save setting. Normal plugin settings are eligible for cloud sync, so pass `True` for platform-only values such as local paths, executable paths, shell commands, hotkeys, browser profiles, application paths, and system integrations.
 - `on_setting_changed(ctx, callback)`: Listen for changes.
 - `on_get_dynamic_setting(ctx, callback)`: Provide runtime-generated setting definitions for `dynamic` settings.
+- `on_mru_restore(ctx, callback)`: Rebuild a start-page result from stored `MRUData`. Declare the `mru` feature first. Return `None` when the item is stale. Put restore identity on action `ContextData` when building results. Return immediately from memory or local cache. Wox waits 300ms, then discards that start-page restore and shows the next MRU item. Do not fetch or call host APIs inside the callback.
 
 ### UI Updates
 
-- `update_result(ctx, result: UpdatableResult)`: Real-time update.
+- `update_result(ctx, result: UpdatableResult)`: Update one visible result in place. Keep the same id. See `SKILL.md`.
 - `push_results(ctx, query, results)`: Append results.
-- `refresh_query(ctx, param)`: Re-run query.
+- `refresh_query(ctx, param)`: Re-run the current query. Use only when rows must be added or removed. See `SKILL.md`.
 - `get_updatable_result(ctx, result_id)`: Get current result state.
+
+### Plugin Tools
+
+Runtime-registered callable operations. Requires Wox >= 2.4.5. See `references/plugin_tools.md`.
+
+- `register_plugin_tool(ctx, option)`: Publish a tool owned by this plugin.
+- `unregister_plugin_tool(ctx, option)`: Remove one of this plugin's tools.
+- `list_plugin_tools(ctx, option)`: Snapshot of callable tools.
+- `invoke_plugin_tool(ctx, option)`: Validate arguments, run another plugin's tool, validate output.
 
 ### AI
 
@@ -119,8 +141,8 @@ Prefer these APIs for all plugin settings. Values stored here can sync across ma
 
 ## Settings Authoring Notes
 
-- Prefer `get_setting`, `save_setting`, and `on_setting_changed` for plugin settings. These APIs participate in Wox cloud sync across machines. Avoid local files or custom persistence for values the user would expect to follow them to another device.
-- If the plugin caches files, put them under `get_cache_folder(ctx)` first. Do not invent a cache directory under the plugin folder or user-data tree.
+- Prefer `get_setting`, `set_setting`, and `on_setting_changed` for user settings. These APIs participate in Wox cloud sync across machines. `save_setting` remains for plugins that must run before Wox 2.4.0. Avoid local files or custom persistence for values the user would expect to follow them to another device.
+- Put cache under `get_cache_folder(ctx)`. Do not save fetched payloads or other rebuildable data with `save_setting` or `set_setting`. Do not invent a cache directory under the plugin folder or user-data tree.
 - The Python SDK exports helper builders for:
   - `create_textbox_setting()`
   - `create_checkbox_setting()`
@@ -208,7 +230,15 @@ async def _on_get_dynamic_setting(ctx, key):
 from wox_plugin import Plugin, Query, Result, WoxImage
 
 class HelloPlugin(Plugin):
-    async def init(self, ctx, params): self.api = params.api
+    async def init(self, ctx, params):
+        self.api = params.api
+        await self.api.on_mru_restore(ctx, self._on_mru_restore)
+
+    async def _on_mru_restore(self, ctx, mru_data):
+        item_id = (mru_data.context_data or {}).get("id")
+        if not item_id:
+            return None
+        return Result(title=item_id, identity_key=item_id, actions=[])
 
     async def query(self, ctx, query):
         # I18n with formatting
@@ -226,16 +256,22 @@ plugin = HelloPlugin()
 
 ## Static HTML preview
 
-Use `WoxPreviewType.WEBVIEW` with a JSON-encoded `html` field. No HTTP server or temporary HTML file is needed; there is no separate `html` preview type.
+A result preview is only for a large body that does not fit the row. See `SKILL.md`. When a preview is required, prose, lists, links, and images belong in `markdown`. Use `WoxPreviewType.WEBVIEW` with a JSON-encoded `html` field only after markdown cannot express that preview. HTML is the last option because the webview can steal query focus, miss theme colors, and hit layout bugs. No HTTP server or temporary HTML file is needed; there is no separate `html` preview type.
+
+Do not rasterize documents as SVG/`image` previews.
+
+When HTML is required, paint the page from `get_theme_colors` so light and dark launcher themes stay in sync. Put a theme color in `cache_key`.
 
 ```python
 import json
 from wox_plugin import WoxPreview, WoxPreviewType
 
+colors = await self.api.get_theme_colors(ctx)
 preview = WoxPreview(
     preview_type=WoxPreviewType.WEBVIEW,
     preview_data=json.dumps({
-        "html": '<!doctype html><html><body><h1 style="color:teal">Hello Wox</h1></body></html>'
+        "html": f'<!doctype html><html><body style="background:{colors.background};color:{colors.text}">Hello Wox</body></html>',
+        "cacheKey": f"hello:{colors.background}",
     }),
 )
 # Assign preview to Result(preview=preview, ...).

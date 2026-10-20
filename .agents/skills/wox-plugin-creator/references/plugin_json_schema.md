@@ -6,7 +6,7 @@ This document defines the schema for `plugin.json`, the manifest file required f
 
 The `plugin.json` file must be a valid JSON object located in the root of your plugin directory.
 
-> **Note**: Script plugins and single-file SDK plugins do **not** use `plugin.json`. They embed a JSON metadata block inside the file header comments. Single-file SDK plugins must set `MinWoxVersion` to `"2.4.2"`.
+> **Note**: Single-file SDK plugins do **not** use `plugin.json`. They embed a JSON metadata block inside the file header comments and must set `MinWoxVersion` to `"2.4.2"`.
 
 ## Fields Specification
 
@@ -67,7 +67,7 @@ Rules:
 
 - `SettingKey` must match a configurable setting key from `SettingDefinitions`.
 - `Validators` is optional. If omitted or empty, Wox reuses the validators from the matching setting definition.
-- If both the requirement and setting definition have no validators, Wox logs a metadata issue and does not block the query.
+- If both the requirement and setting definition have no validators, Wox does not block the query. Put `not_empty` on the requirement when the query must not run with an empty value.
 - `Message` is optional and supports `i18n:` keys. Use it for field-specific setup guidance.
 
 Example:
@@ -117,16 +117,16 @@ Use this reference as the source of truth when authoring `SettingDefinitions` in
 
 | Property              | Type       | Description                                                                                                       |
 | --------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------- |
-| `Type`                | `string`   | Component type. Enum: `head`, `textbox`, `checkbox`, `select`, `label`, `newline`, `table`, `selectAIModel`, `dynamic` |
+| `Type`                | `string`   | Component type. Enum: `head`, `textbox`, `password`, `checkbox`, `select`, `label`, `newline`, `table`, `selectAIModel`, `dynamic` |
 | `Value`               | `object`   | Configuration object specific to the type.                                                                        |
 | `DisabledInPlatforms` | `string[]` | Optional. Platforms where this setting is disabled. Uses SDK platform names such as `windows`, `darwin`, `linux`. |
 | `IsPlatformSpecific`  | `boolean`  | Optional. If `true`, Wox stores different values per platform. Normal plugin settings are eligible for cloud sync, so use this for values that should not be shared across Windows, macOS, and Linux. |
 
 #### Cloud Sync And Platform-Specific Settings
 
-SDK and single-file SDK plugins should persist settings through the Public API setting methods (`GetSetting` / `SaveSetting` / `OnSettingChanged`, or Python `get_setting` / `save_setting` / `on_setting_changed`). Those APIs are what Wox can sync across machines. Do not store ordinary plugin settings in local files or a custom store.
+SDK and single-file SDK plugins persist user settings through the Public API (`GetSetting` / `SaveSetting` / `SetSetting` / `OnSettingChanged`, or Python `get_setting` / `save_setting` / `set_setting` / `on_setting_changed`). A normal setting write is cloud-synced. Do not store ordinary plugin settings in local files or a custom store.
 
-Machine-local cache is different. If the plugin downloads files, stores thumbnails, or caches search results, put those files under `GetCacheFolder` / `get_cache_folder` (`~/.wox/cache/plugins/<plugin-id>/`) first. Script plugins use `WOX_DIRECTORY_PLUGIN_CACHE`. Do not create a custom `cache/` directory beside the plugin or under user data.
+Cache stays out of those APIs. Fetched JSON, subject or entity snapshots, search indexes, downloads, and thumbnails go under `GetCacheFolder` / `get_cache_folder` (`~/.wox/cache/plugins/<plugin-id>/`). Do not pass them to `SaveSetting`, `SetSetting`, `save_setting`, or `set_setting`, including a hidden key that is absent from `SettingDefinitions`. Each settings write becomes a sync record, so a cache blob is uploaded on every refresh and fills sync history. `IsPlatformSpecific` still syncs. `IsLocal` / `is_local` is only for a small machine-local preference, such as a window position, and is not a cache store. Do not create a custom `cache/` directory beside the plugin or under user data.
 
 Before adding a setting, decide whether cloud sync should share one value across all devices or keep a separate value per platform.
 
@@ -299,6 +299,9 @@ Examples:
     "SortColumnKey": "name",
     "SortOrder": "asc",
     "MaxHeight": 500,
+    "Groups": [
+      { "Key": "advanced", "Title": "Advanced", "CollapsedByDefault": true }
+    ],
     "Columns": [
       {
         "Label": "Name",
@@ -313,6 +316,13 @@ Examples:
         "Key": "model",
         "Type": "selectAIModel",
         "Width": 120
+      },
+      {
+        "Label": "Notes",
+        "Key": "notes",
+        "Type": "text",
+        "HideInTable": true,
+        "Group": "advanced"
       }
     ],
     "Style": {}
@@ -343,6 +353,9 @@ Table column notes:
 - `QueryVariableKind` selects the `{wox:...}` picker set for `queryVariable` and `queryVariableList` (`queryHotkey`, `aiCommand`, `dictation`, `webSearch`). Those fields show variable chips and open the picker when the user types `{`.
 - `HideInTable` hides the column in the list but keeps it in the edit dialog.
 - `HideInUpdate` hides the column in the edit dialog but keeps it in the list.
+- `EmptyAsZero` maps blank integer editor text to persisted `0`.
+- `Groups` names collapsible sections in the add/edit dialog (`Key`, `Title`, optional `Tooltip`, `CollapsedByDefault`).
+- `Group` on a column is a `Groups[].Key`. Empty `Group` fields stay ungrouped at the top. Declared groups appear below in `Groups` order.
 
 #### 6. Dynamic
 
@@ -382,6 +395,8 @@ The `Icon` string uses a `prefix:data` format. Supported prefixes:
 | `svg:`      | raw SVG string.                              | `"svg:<svg>...</svg>"`                |
 | `url:`      | Remote image URL.                            | `"url:https://example.com/icon.png"`  |
 | `lottie:`   | Lottie animation JSON.                       | `"lottie:{...}"`                      |
+
+Plugin metadata and result-row `Icon` values may use any of these formats. Action Panel leading icons should be `svg:` markup that paints with `var(--wox-theme-icon-color)`. See `references/icons.md`.
 
 ## Features Specification
 
@@ -433,12 +448,25 @@ Delays query execution until the user stops typing for `IntervalMs`.
 
 ### 5. MRU (Most Recently Used)
 
-Enables automatic boosting of frequently used results.
+SDK and single-file SDK plugins should enable MRU by default. Wox records a result after the user executes an action, then asks the plugin to rebuild it on the launcher start page.
+
+Skip MRU only when the plugin is clearly unsuitable: results depend on the current selection, foreground app, or Open/Save dialog; the plugin is a one-shot action; it is diagnostic or maintenance-only; or it already is a history/inbox surface. If you skip it, document why.
+
+Declare the feature and implement `OnMRURestore` / `on_mru_restore`. Put restore identity on the executed action's `ContextData`. Return `null` / an error when the item is gone.
+
+The restore callback must return immediately from memory or local cache. Wox waits 300ms for each start-page MRU restore. If the callback has not returned, Wox discards that item, logs the timeout, and shows the next MRU item. Do not fetch, scan disk, or call host APIs inside the callback.
+
+`HashBy` options:
+
+- `identityKey`: result `IdentityKey`. Use this for a durable result. Its `IdentityKey` / `identity_key` identifies that result alone and stays the same when its title changes. Omit it on a temporary prompt, empty or error state, or one-time status. `scoreKey` is the older name and is still accepted.
+- `title` (default when `HashBy` is omitted): `Title` + `SubTitle`
+- `rawQuery`: original `Query.RawQuery`
+- `search`: `Query.Search`
 
 ```json
 {
   "Name": "mru",
-  "Params": { "HashBy": "title" } // Options: "title", "rawQuery", "search"
+  "Params": { "HashBy": "identityKey" }
 }
 ```
 

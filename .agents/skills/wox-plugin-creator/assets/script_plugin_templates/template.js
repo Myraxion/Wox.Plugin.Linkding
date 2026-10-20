@@ -6,7 +6,7 @@
 //   "Version": "1.0.0",
 //   "MinWoxVersion": "2.0.0",
 //   "Description": "{{.Description}}",
-//   "Icon": "emoji:📝",
+//   "Icon": "svg:<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'><rect width='48' height='48' rx='12' fill='#2563eb'/><path d='M14 11h14l7 7v19H14z' fill='#eff6ff'/><path d='M28 11v7h7' fill='#bfdbfe'/><path d='M19 24h11M19 29h11M19 34h7' fill='none' stroke='#2563eb' stroke-width='2.5' stroke-linecap='round'/></svg>",
 //   "TriggerKeywords": {{.TriggerKeywordsJSON}},
 //   "SettingDefinitions": [
 //     {
@@ -53,8 +53,9 @@
  * - Use "actions" field with an array of action objects (even for single action)
  * - Each action can have a "name" field (displayed in UI, defaults to "Execute")
  * - Set isDefault: true to make Enter run that action. The first action is the default if omitted.
- * - Set hotkey for extra shortcuts, such as "ctrl+enter"
+ * - Optional hotkey: prefer cmd on macOS / ctrl on Windows and Linux; avoid Wox built-ins and duplicate bindings
  * - Set preventHideAfterAction: true on an action to keep Wox open after it runs
+ * - Action icons must be monochrome svg: markup using var(--wox-theme-icon-color). Do not use emoji as the leading action icon.
  *
  * Built-in Actions (handled automatically by Wox, no need to implement in handleAction):
  * - copy-to-clipboard: Copy text to clipboard
@@ -84,6 +85,11 @@
  * - WOX_DIRECTORY_PLUGIN_CACHE: Dedicated cache folder (~/.wox/cache/plugins/<plugin-id>/), deleted on uninstall
  * - WOX_SETTING_<KEY>: Plugin settings (e.g., WOX_SETTING_API_KEY for setting key "api_key")
  */
+
+const ACTION_COPY_ICON = 'svg:<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--wox-theme-icon-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
+const ACTION_OPEN_ICON = 'svg:<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--wox-theme-icon-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 5h5v5M19 5l-9 9"/><path d="M13 7H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-7"/></svg>';
+const ACTION_EXECUTE_ICON = 'svg:<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--wox-theme-icon-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5h5.5L9 22l10-13h-6z"/></svg>';
+const RESULT_ICON = "svg:<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'><rect width='48' height='48' rx='12' fill='#2563eb'/><path d='M14 11h14l7 7v19H14z' fill='#eff6ff'/><path d='M28 11v7h7' fill='#bfdbfe'/><path d='M19 24h11M19 29h11M19 34h7' fill='none' stroke='#2563eb' stroke-width='2.5' stroke-linecap='round'/></svg>";
 
 /**
  * Wox plugin base class for script plugins. Do not modify this class.
@@ -120,7 +126,7 @@ class WoxPluginBase {
           {
             name: "Copy",
             id: "copy-to-clipboard",
-            icon: "emoji:📋",
+            icon: ACTION_COPY_ICON,
             text: "Hello Wox!",
           },
         ],
@@ -275,12 +281,12 @@ class MyPlugin extends WoxPluginBase {
       {
         title: `Query: ${input.search}`,
         subtitle: "Click to copy the query to clipboard",
-        icon: "emoji:📋",
+        icon: RESULT_ICON,
         score: 100,
         actions: [
           {
             name: "Copy",
-            icon: "emoji:📋",
+            icon: ACTION_COPY_ICON,
             id: "copy-to-clipboard",
             text: input.search,
           },
@@ -289,24 +295,24 @@ class MyPlugin extends WoxPluginBase {
       {
         title: "Example: Multiple Actions",
         subtitle: "Alt/Cmd + J to see multiple actions",
-        icon: "emoji:⚙️",
+        icon: RESULT_ICON,
         score: 90,
         actions: [
           {
             name: "Copy",
-            icon: "emoji:📋",
+            icon: ACTION_COPY_ICON,
             id: "copy-to-clipboard",
             text: "Copied text",
           },
           {
             name: "Open Directory",
-            icon: "emoji:📁",
+            icon: ACTION_OPEN_ICON,
             id: "open-directory",
             path: process.env.WOX_DIRECTORY_USER_SCRIPT_PLUGINS,
           },
           {
             name: "Custom Action",
-            icon: "emoji:🚀",
+            icon: ACTION_EXECUTE_ICON,
             id: "custom-action",
             data: "custom data",
           },
@@ -315,12 +321,12 @@ class MyPlugin extends WoxPluginBase {
       {
         title: "Settings Example",
         subtitle: `API Key configured: ${apiKey ? "Yes" : "No"}`,
-        icon: "emoji:🔑",
+        icon: RESULT_ICON,
         score: 70,
         actions: [
           {
             name: "Copy API Key",
-            icon: "emoji:📋",
+            icon: ACTION_COPY_ICON,
             id: "copy-to-clipboard",
             text: `API Key: ${apiKey || "Not configured"}`,
           },

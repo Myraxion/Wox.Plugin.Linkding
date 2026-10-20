@@ -5,8 +5,8 @@ Use it when `plugin.json` needs `SettingDefinitions`, validators, dynamic settin
 
 ## Choose The Right Pattern
 
-- SDK and single-file SDK plugins should store settings with the Public API setting methods (`GetSetting` / `SaveSetting` / `OnSettingChanged`, or Python `get_setting` / `save_setting` / `on_setting_changed`). Those APIs can sync values across machines. Do not invent a local file or custom store for ordinary plugin settings.
-- Cache files are not settings. If the plugin needs downloads, thumbnails, or search-result files, put them under `GetCacheFolder` / `get_cache_folder` first. Script plugins use `WOX_DIRECTORY_PLUGIN_CACHE`.
+- SDK and single-file SDK plugins store user settings with the Public API (`GetSetting` / `SaveSetting` / `SetSetting` / `OnSettingChanged`, or Python `get_setting` / `save_setting` / `set_setting` / `on_setting_changed`). A normal setting write is cloud-synced. Do not invent a local file or custom store for ordinary plugin settings.
+- Cache stays out of the settings API. Downloads, thumbnails, fetched JSON, and other data the plugin can rebuild go under `GetCacheFolder` / `get_cache_folder`. A cache value saved with `SaveSetting` / `SetSetting` / `save_setting` / `set_setting` is replicated on every change and fills sync history, even when the key is hidden from `SettingDefinitions`. `IsLocal` / `is_local` is for a small machine-local preference, not a cache blob.
 - Use a `textbox` for free-form string input.
 - Add validators when empty or non-numeric values should be rejected.
 - Use a `select` for a fixed option list.
@@ -140,6 +140,9 @@ Use tables when a plugin needs a list of structured items.
     "SortColumnKey": "name",
     "SortOrder": "asc",
     "MaxHeight": 420,
+    "Groups": [
+      { "Key": "advanced", "Title": "Advanced", "CollapsedByDefault": true }
+    ],
     "Columns": [
       {
         "Key": "name",
@@ -159,6 +162,13 @@ Use tables when a plugin needs a list of structured items.
         "Label": "Model",
         "Type": "selectAIModel",
         "Width": 130
+      },
+      {
+        "Key": "notes",
+        "Label": "Notes",
+        "Type": "text",
+        "HideInTable": true,
+        "Group": "advanced"
       }
     ]
   }
@@ -171,6 +181,8 @@ Useful table column options:
 - `SelectOptions`: option list for `select` columns
 - `HideInTable`: keep field in the edit dialog only
 - `HideInUpdate`: show field in the table only
+- `EmptyAsZero`: blank integer editor values persist as `0`
+- `Groups` / `Group`: collapsible add/edit sections; empty `Group` stays ungrouped at the top
 
 ## Pattern 5: Dynamic Setting
 
