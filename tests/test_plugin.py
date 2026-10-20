@@ -221,6 +221,10 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("error_auth_failed", i18n[lang])
             self.assertIn("error_auth_failed_sub", i18n[lang])
             self.assertIn("error_network", i18n[lang])
+            self.assertIn("error_api", i18n[lang])
+            self.assertIn("error_search_bookmarks", i18n[lang])
+            self.assertIn("error_check_bookmark", i18n[lang])
+            self.assertIn("error_fetch_tags", i18n[lang])
             self.assertIn("error_timeout", i18n[lang])
             self.assertIn("error_timeout_sub", i18n[lang])
             self.assertIn("bookmark_already_exists", i18n[lang])
@@ -580,6 +584,60 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.title, "i18n:error_timeout")
             self.assertEqual(res.sub_title, "i18n:error_timeout_sub")
 
+
+
+    async def test_query_paths_map_request_errors_consistently(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        paths = [
+            ("python", False, "i18n:error_search_bookmarks"),
+            ("#", False, "i18n:error_fetch_tags"),
+            ("#github #", False, "i18n:error_fetch_tags"),
+            ("https://example.com", False, "i18n:error_check_bookmark"),
+            ("https://example.com", True, "i18n:error_check_bookmark"),
+            ("python", True, "i18n:selection_search_failed"),
+        ]
+        errors = [
+            (urllib.error.HTTPError("url", 401, "Unauthorized", {}, None), "auth", "i18n:error_auth_failed", "i18n:error_auth_failed_sub"),
+            (urllib.error.HTTPError("url", 403, "Forbidden", {}, None), "auth", "i18n:error_auth_failed", "i18n:error_auth_failed_sub"),
+            (urllib.error.HTTPError("url", 500, "Server Error", {}, None), "api", "i18n:error_api", "HTTP 500: Server Error"),
+            (urllib.error.URLError("offline"), "network", "i18n:error_network", "offline"),
+            (TimeoutError("timed out"), "timeout", "i18n:error_timeout", "i18n:error_timeout_sub"),
+            (urllib.error.URLError(TimeoutError()), "timeout", "i18n:error_timeout", "i18n:error_timeout_sub"),
+            (urllib.error.URLError("timed out"), "timeout", "i18n:error_timeout", "i18n:error_timeout_sub"),
+            (ValueError("invalid JSON"), "generic", None, "invalid JSON"),
+        ]
+        for search, selected, generic_title in paths:
+            for error, category, title, subtitle in errors:
+                with self.subTest(search=search, selected=selected, category=category):
+                    query = Query(
+                        id="q_errors", type=QueryType.SELECTION if selected else QueryType.INPUT,
+                        raw_query="" if selected else f"ld {search}",
+                        selection=Selection(type=SelectionType.TEXT, text=search) if selected else Selection(),
+                        env=QueryEnv(), trigger_keyword="" if selected else "ld", command="",
+                        search="" if selected else search,
+                    )
+                    with patch("urllib.request.urlopen", side_effect=error):
+                        if selected and search == "python":
+                            response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
+                            result = response.results[0]
+                            expected_status = title if category in ("auth", "network", "timeout") else generic_title
+                            self.assertEqual(result.id, "selection:bookmarks")
+                            self.assertEqual(result.title, "i18n:selection_entry_title")
+                            self.assertEqual(result.sub_title, expected_status)
+                            preview = WoxPreviewListData.from_json(json.loads(result.preview.preview_data))
+                            self.assertEqual(preview.items[0].title, expected_status)
+                        else:
+                            response = await self.plugin.query(self.ctx, query)
+                            result = response.results[0]
+                            self.assertEqual(result.id, f"error:{category}")
+                            self.assertEqual(result.title, title or generic_title)
+                            self.assertEqual(result.sub_title, subtitle)
+                        self.assertEqual(result.actions, [])
+                        self.assertEqual(result.icon.image_type, WoxImageType.SVG)
+                        expected_ratio = 0.6 if selected else QueryLayout().result_preview_width_ratio
+                        self.assertEqual(response.layout.result_preview_width_ratio, expected_ratio)
 
 
 class TestBookmarkFavicons(unittest.IsolatedAsyncioTestCase):
@@ -1749,6 +1807,33 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([result.tails[0].text for result in res.results], ["10", "1"])
             self.assertIn("limit=100", mock_urlopen.call_args[0][0].full_url)
 
+    async def test_bookmark_and_tag_queries_share_responses_only_at_same_limit(self):
+        from unittest.mock import MagicMock, patch
+        from urllib.parse import parse_qs, urlsplit
+
+        bookmarks = [
+            {"id": index, "url": f"https://example.com/{index}", "tag_names": ["github", "python"]}
+            for index in range(10)
+        ]
+        bookmarks.append({"id": 10, "url": "https://example.com/10", "tag_names": ["github", "rare"]})
+
+        def urlopen(request, **kwargs):
+            limit = int(parse_qs(urlsplit(request.full_url).query)["limit"][0])
+            response = MagicMock()
+            response.read.return_value = json.dumps({"count": 11, "results": bookmarks[:limit]}).encode("utf-8")
+            response.__enter__.return_value = response
+            return response
+
+        for limit, expected_count, expected_requests in ((10, 10, 2), (100, 11, 1)):
+            with self.subTest(limit=limit):
+                await self.mock_api.setting_changed_callbacks[0](self.ctx, "max_results", str(limit))
+                with patch("urllib.request.urlopen", side_effect=urlopen) as http:
+                    tags = await self.plugin.query(self.ctx, self._make_query("#github #"))
+                    self.assertEqual([result.title for result in tags.results], ["#python", "#rare"])
+                    flat = await self.plugin.query(self.ctx, self._make_query("#github "))
+                    self.assertEqual(len(flat.results), expected_count)
+                    self.assertEqual(http.call_count, expected_requests)
+
     async def test_cooccurring_tags_empty_when_no_bookmarks(self):
         from unittest.mock import MagicMock, patch
 
@@ -1933,6 +2018,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             ("api_token", "replacement"), ("max_results", "5"),
         ]:
             with self.subTest(change=key):
+                search_text = f"Example {key}"
                 gate = threading.Event()
                 started, finished = asyncio.Event(), asyncio.Event()
                 loop = asyncio.get_running_loop()
@@ -1957,7 +2043,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 with patch("urllib.request.urlopen", side_effect=urlopen):
                     try:
                         response = await self.plugin.query(self.ctx, self._make_selection_query(
-                            Selection(type=SelectionType.TEXT, text="Example")))
+                            Selection(type=SelectionType.TEXT, text=search_text)))
                         await asyncio.wait_for(started.wait(), timeout=1)
                         expand = asyncio.create_task(response.results[0].actions[0].action(self.ctx, ActionContext()))
                         await asyncio.sleep(0)
@@ -1970,7 +2056,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(expand, timeout=1)
                     await asyncio.wait_for(finished.wait(), timeout=1)
                     fresh = await self.plugin.query(self.ctx, Query(
-                        id="input", type=QueryType.INPUT, raw_query="ld Example", search="Example",
+                        id="input", type=QueryType.INPUT, raw_query=f"ld {search_text}", search=search_text,
                         selection=None, env=QueryEnv(), trigger_keyword="ld", command="",
                     ))
                 self.assertEqual(self.mock_api.result_updates[since:], [])
@@ -1998,6 +2084,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
 
         for hidden in (False, True):
             with self.subTest(hidden=hidden):
+                search_text = f"Example {hidden}"
                 gate = threading.Event()
                 started = asyncio.Event()
                 loop = asyncio.get_running_loop()
@@ -2015,7 +2102,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 with patch("urllib.request.urlopen", side_effect=urlopen):
                     try:
                         response = await self.plugin.query(self.ctx, self._make_selection_query(
-                            Selection(type=SelectionType.TEXT, text="Example")))
+                            Selection(type=SelectionType.TEXT, text=search_text)))
                         await asyncio.wait_for(started.wait(), timeout=1)
                         expand = asyncio.create_task(response.results[0].actions[0].action(self.ctx, ActionContext()))
                         await asyncio.sleep(0)
@@ -2270,6 +2357,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
 
         for match_count in (0, 2):
             with self.subTest(match_count=match_count):
+                search_text = f"Wox guide {match_count}"
                 self.mock_api.changed_queries.clear()
                 self.mock_api.setting_reads.clear()
                 self.mock_api.settings["TriggerKeywords"] = '["*", "bookmarks", "bm"]'
@@ -2282,7 +2370,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                     ],
                 }).encode("utf-8")
                 mock_http_response.__enter__.return_value = mock_http_response
-                query = self._make_selection_query(Selection(type=SelectionType.TEXT, text="Wox guide"))
+                query = self._make_selection_query(Selection(type=SelectionType.TEXT, text=search_text))
 
                 with patch("urllib.request.urlopen", return_value=mock_http_response):
                     response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
@@ -2297,13 +2385,13 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.mock_api.setting_reads, ["TriggerKeywords"])
                 self.assertEqual(len(self.mock_api.changed_queries), 1)
                 self.assertEqual(self.mock_api.changed_queries[0].query_type, QueryType.INPUT)
-                self.assertEqual(self.mock_api.changed_queries[0].query_text, "bookmarks Wox guide")
+                self.assertEqual(self.mock_api.changed_queries[0].query_text, f"bookmarks {search_text}")
 
                 # The next aggregation query picks up configuration changes.
                 with patch("urllib.request.urlopen", return_value=mock_http_response):
                     response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
                 await response.results[0].actions[0].action(self.ctx, ActionContext())
-                self.assertEqual(self.mock_api.changed_queries[-1].query_text, "bm Wox guide")
+                self.assertEqual(self.mock_api.changed_queries[-1].query_text, f"bm {search_text}")
                 self.assertEqual(self.mock_api.setting_reads, ["TriggerKeywords", "TriggerKeywords"])
 
     async def test_selection_query_expansion_reuses_empty_and_multiple_matches(self):
@@ -2312,6 +2400,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
 
         for match_count in (0, 2):
             with self.subTest(match_count=match_count):
+                search_text = f"Wox guide {match_count}"
                 mock_http_response = MagicMock()
                 mock_http_response.read.return_value = json.dumps({
                     "count": match_count,
@@ -2322,7 +2411,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 }).encode("utf-8")
                 mock_http_response.__enter__.return_value = mock_http_response
                 selection_query = self._make_selection_query(
-                    Selection(type=SelectionType.TEXT, text=" Wox guide ")
+                    Selection(type=SelectionType.TEXT, text=f" {search_text} ")
                 )
                 with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
                     response = await self.plugin.query(self.ctx, selection_query)
@@ -2336,7 +2425,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                         env=QueryEnv(),
                         trigger_keyword="ld",
                         command="",
-                        search="Wox guide",
+                        search=search_text,
                     )
                     expanded = await self.plugin.query(self.ctx, expanded_query)
                     expected_ids = ["bookmark:0", "bookmark:1"] if match_count else ["bookmark:empty"]
@@ -2350,7 +2439,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
 
                     # Changing credentials invalidates the response seeded by selection.
                     await self.mock_api.setting_changed_callbacks[0](self.ctx, "api_token", "new_token")
-                    expanded_query.search = "Wox guide"
+                    expanded_query.search = search_text
                     expanded_query.raw_query = changed_query.query_text
                     await self.plugin.query(self.ctx, expanded_query)
                     self.assertEqual(mock_urlopen.call_count, 3)
@@ -2913,6 +3002,69 @@ class TestBookmarkSearchCache(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_urlopen.call_count, 2)
             self.assertEqual(len(res4.results), 1)
             self.assertEqual(res4.results[0].id, "bookmark:1")
+
+    async def test_input_and_selection_share_fresh_responses(self):
+        from unittest.mock import MagicMock, patch
+
+        for bookmarks in ([], [
+            {"id": 1, "url": "https://example.com/1", "title": "First"},
+            {"id": 2, "url": "https://example.com/2", "title": "Second"},
+        ]):
+            with self.subTest(count=len(bookmarks)):
+                search_text = f"example{len(bookmarks)}"
+                selection = Query(
+                    id="q_shared_selection", type=QueryType.SELECTION, raw_query="",
+                    selection=Selection(type=SelectionType.TEXT, text=search_text),
+                    env=QueryEnv(), trigger_keyword="", command="", search="",
+                )
+                response = MagicMock()
+                response.read.return_value = json.dumps({
+                    "count": len(bookmarks), "results": bookmarks,
+                }).encode("utf-8")
+                response.__enter__.return_value = response
+
+                with patch("urllib.request.urlopen", return_value=response) as http:
+                    flat = await self.plugin.query(self.ctx, self._make_query(search_text))
+                    for _ in range(2):
+                        aggregated = await query_selection_and_wait(
+                            self.plugin, self.mock_api, self.ctx, selection,
+                        )
+                        self.assertEqual(aggregated.results[0].id, "selection:bookmarks")
+                        self.assertEqual(len(aggregated.results[0].actions), 2)
+                    expanded = await self.plugin.query(self.ctx, self._make_query(search_text))
+                    self.assertEqual([result.id for result in expanded.results], [result.id for result in flat.results])
+                    self.assertEqual(http.call_count, 1)
+
+    async def test_selection_refreshes_expired_shared_response(self):
+        from unittest.mock import MagicMock, patch
+
+        selection = Query(
+            id="q_expired_selection", type=QueryType.SELECTION, raw_query="",
+            selection=Selection(type=SelectionType.TEXT, text="python"),
+            env=QueryEnv(), trigger_keyword="", command="", search="",
+        )
+        responses = []
+        for bookmarks in ([], [{"id": 1, "url": "https://example.com", "title": "Refreshed"}]):
+            response = MagicMock()
+            response.read.return_value = json.dumps({"count": len(bookmarks), "results": bookmarks}).encode("utf-8")
+            response.__enter__.return_value = response
+            responses.append(response)
+
+        with patch("time.time", return_value=1000.0) as clock, \
+             patch("urllib.request.urlopen", side_effect=responses) as http:
+            await self.plugin.query(self.ctx, self._make_query("python"))
+            clock.return_value = 1029.0
+            cached = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, selection)
+            self.assertEqual(cached.results[0].sub_title, "i18n:selection_press_enter_to_edit")
+            self.assertEqual(http.call_count, 1)
+
+            clock.return_value = 1031.0
+            refreshed = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, selection)
+            preview = WoxPreviewListData.from_json(json.loads(refreshed.results[0].preview.preview_data))
+            self.assertEqual(preview.items[0].title, "Refreshed")
+            flat = await self.plugin.query(self.ctx, self._make_query("python"))
+            self.assertEqual(flat.results[0].title, "Refreshed")
+            self.assertEqual(http.call_count, 2)
 
     async def test_search_bookmarks_cache_invalidates_on_setting_changed(self):
         from unittest.mock import MagicMock, patch

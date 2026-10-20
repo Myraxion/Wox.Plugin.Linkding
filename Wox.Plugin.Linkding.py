@@ -41,6 +41,10 @@
 #       "error_auth_failed": "Authentication Failed",
 #       "error_auth_failed_sub": "Please check your Linkding API token in settings",
 #       "error_network": "Network Connection Error",
+#       "error_api": "Linkding API Error",
+#       "error_search_bookmarks": "Error searching bookmarks",
+#       "error_check_bookmark": "Error checking bookmark",
+#       "error_fetch_tags": "Error fetching tags",
 #       "error_timeout": "Request Timed Out",
 #       "error_timeout_sub": "Connection to Linkding server timed out",
 #       "bookmark_already_exists": "⚠️ Already bookmarked",
@@ -82,6 +86,10 @@
 #       "error_auth_failed": "认证失败",
 #       "error_auth_failed_sub": "请在设置中检查 Linkding API 令牌",
 #       "error_network": "网络连接错误",
+#       "error_api": "Linkding API 错误",
+#       "error_search_bookmarks": "搜索书签失败",
+#       "error_check_bookmark": "检查书签失败",
+#       "error_fetch_tags": "获取标签失败",
 #       "error_timeout": "请求超时",
 #       "error_timeout_sub": "连接 Linkding 服务器超时",
 #       "bookmark_already_exists": "⚠️ 该 URL 已收藏",
@@ -283,9 +291,7 @@ class LinkdingPlugin(Plugin):
         self._tag_cache: Optional[List[str]] = None
         self._tag_cache_time: float = 0.0
         self.TAG_CACHE_TTL: float = 300.0
-        self._cooccurring_tag_cache: Dict[str, tuple[float, Dict[str, int]]] = {}
-        self.COOCCURRING_TAG_CACHE_TTL: float = 30.0
-        self._bookmark_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._bookmark_cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]] = {}
         self.BOOKMARK_CACHE_TTL: float = 30.0
         self._query_generation = 0
         self._selection_search: Optional[asyncio.Task[Optional[Result]]] = None
@@ -354,7 +360,6 @@ class LinkdingPlugin(Plugin):
 
     def _invalidate_data_caches(self, *, include_tags: bool = True) -> None:
         self._bookmark_cache.clear()
-        self._cooccurring_tag_cache.clear()
         if include_tags:
             self._tag_cache = None
             self._tag_cache_time = 0.0
@@ -574,89 +579,13 @@ class LinkdingPlugin(Plugin):
 
     async def _search_bookmarks(self, ctx: Context, search_text: str) -> QueryResponse:
         encoded_q = urllib.parse.quote(search_text)
-        cache_key = search_text.strip()
-        now = time.time()
-        cached = self._bookmark_cache.get(cache_key)
-        if cached is not None and (now - cached[0]) < self.BOOKMARK_CACHE_TTL:
-            resp_data = cached[1]
-        else:
-            req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={self.max_results}"
-            req = self._create_request(req_url)
-
-            try:
-                resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
-                self._bookmark_cache[cache_key] = (now, resp_data)
-            except urllib.error.HTTPError as e:
-                await self._clear_status(ctx)
-                if e.code in (401, 403):
-                    return QueryResponse(
-                        results=[
-                            Result(
-                                id="error:auth",
-                                title="i18n:error_auth_failed",
-                                sub_title="i18n:error_auth_failed_sub",
-                                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                            )
-                        ]
-                    )
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:api",
-                            title=f"Linkding API Error (HTTP {e.code})",
-                            sub_title=str(e.reason),
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ]
-                )
-            except urllib.error.URLError as e:
-                await self._clear_status(ctx)
-                reason_str = str(e.reason)
-                if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
-                    return QueryResponse(
-                        results=[
-                            Result(
-                                id="error:timeout",
-                                title="i18n:error_timeout",
-                                sub_title="i18n:error_timeout_sub",
-                                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                            )
-                        ]
-                    )
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:network",
-                            title="i18n:error_network",
-                            sub_title=reason_str,
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ]
-                )
-            except TimeoutError:
-                await self._clear_status(ctx)
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:timeout",
-                            title="i18n:error_timeout",
-                            sub_title="i18n:error_timeout_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ]
-                )
-            except Exception as e:
-                await self._clear_status(ctx)
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:generic",
-                            title="Error searching bookmarks",
-                            sub_title=str(e),
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ]
-                )
+        try:
+            resp_data = await self._load_bookmarks(search_text, self.max_results)
+        except Exception as e:
+            await self._clear_status(ctx)
+            return QueryResponse(
+                results=[self._error_result(e, "i18n:error_search_bookmarks")],
+            )
 
         raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
         total_count = resp_data.get("count", len(raw_bookmarks))
@@ -794,16 +723,16 @@ class LinkdingPlugin(Plugin):
             try:
                 await self._clear_status(ctx)
                 response = await self._load_selection_bookmark_search(ctx, query, search_text)
-            except Exception:
-                response = QueryResponse(results=[Result(
-                    id="error:generic", title="i18n:selection_search_failed",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                )])
+            except Exception as e:
+                response = QueryResponse(results=[self._error_result(e, "i18n:selection_search_failed")])
             if generation != self._query_generation:
                 return None
             result = response.results[0]
             if result.id.startswith("error:"):
-                status = result.title if result.title.startswith("i18n:") else "i18n:selection_search_failed"
+                status = (
+                    result.title if result.id in ("error:auth", "error:network", "error:timeout")
+                    else "i18n:selection_search_failed"
+                )
                 result.sub_title = status
                 result.preview = WoxPreview(
                     preview_type=WoxPreviewType.LIST,
@@ -826,84 +755,11 @@ class LinkdingPlugin(Plugin):
     ) -> QueryResponse:
         layout = QueryLayout(result_preview_width_ratio=0.6)
         encoded_q = urllib.parse.quote(search_text)
-        req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={self.max_results}"
-        req = self._create_request(req_url)
-
         try:
-            resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
-            # Query expansion uses the same response through the regular search cache.
-            self._bookmark_cache[search_text] = (time.time(), resp_data)
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:auth",
-                            title="i18n:error_auth_failed",
-                            sub_title="i18n:error_auth_failed_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ],
-                    layout=layout,
-                )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:api",
-                        title=f"Linkding API Error (HTTP {e.code})",
-                        sub_title=str(e.reason),
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
-                layout=layout,
-            )
-        except urllib.error.URLError as e:
-            reason_str = str(e.reason)
-            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:timeout",
-                            title="i18n:error_timeout",
-                            sub_title="i18n:error_timeout_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ],
-                    layout=layout,
-                )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:network",
-                        title="i18n:error_network",
-                        sub_title=reason_str,
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
-                layout=layout,
-            )
-        except TimeoutError:
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:timeout",
-                        title="i18n:error_timeout",
-                        sub_title="i18n:error_timeout_sub",
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
-                layout=layout,
-            )
+            resp_data = await self._load_bookmarks(search_text, self.max_results)
         except Exception as e:
             return QueryResponse(
-                results=[
-                    Result(
-                        id="error:generic",
-                        title="Error searching bookmarks",
-                        sub_title=str(e),
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
+                results=[self._error_result(e, "i18n:selection_search_failed")],
                 layout=layout,
             )
 
@@ -1008,10 +864,43 @@ class LinkdingPlugin(Plugin):
             layout=layout,
         )
 
-    def _fetch_bookmarks_http(self, req: urllib.request.Request) -> Dict[str, Any]:
+    async def _load_bookmarks(self, search_text: str, limit: int) -> Dict[str, Any]:
+        search_text = search_text.strip()
+        cache_key = (search_text, limit)
+        cached = self._bookmark_cache.get(cache_key)
+        if cached is not None and time.time() - cached[0] < self.BOOKMARK_CACHE_TTL:
+            return cached[1]
+
+        encoded_q = urllib.parse.quote(search_text)
+        req = self._create_request(f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={limit}")
+        resp_data = await asyncio.to_thread(self._fetch_json_http, req)
+        self._bookmark_cache[cache_key] = (time.time(), resp_data)
+        return resp_data
+
+    def _fetch_json_http(self, req: urllib.request.Request) -> Dict[str, Any]:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = resp.read()
             return json.loads(data.decode("utf-8"))
+
+    def _error_result(self, error: Exception, generic_title: str) -> Result:
+        if isinstance(error, urllib.error.HTTPError):
+            if error.code in (401, 403):
+                category, title, subtitle = "auth", "i18n:error_auth_failed", "i18n:error_auth_failed_sub"
+            else:
+                category, title, subtitle = "api", "i18n:error_api", f"HTTP {error.code}: {error.reason}"
+        elif isinstance(error, TimeoutError) or (
+            isinstance(error, urllib.error.URLError)
+            and (isinstance(error.reason, TimeoutError) or "timed out" in str(error.reason).lower())
+        ):
+            category, title, subtitle = "timeout", "i18n:error_timeout", "i18n:error_timeout_sub"
+        elif isinstance(error, urllib.error.URLError):
+            category, title, subtitle = "network", "i18n:error_network", str(error.reason)
+        else:
+            category, title, subtitle = "generic", generic_title, str(error)
+        return Result(
+            id=f"error:{category}", title=title, sub_title=subtitle,
+            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+        )
 
     def _create_open_url_action(self, target_url: str):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
@@ -1088,78 +977,10 @@ class LinkdingPlugin(Plugin):
         req = self._create_request(req_url)
 
         try:
-            check_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:auth",
-                            title="i18n:error_auth_failed",
-                            sub_title="i18n:error_auth_failed_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ],
-                    layout=layout,
-                )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:api",
-                        title=f"Linkding API Error (HTTP {e.code})",
-                        sub_title=str(e.reason),
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
-                layout=layout,
-            )
-        except urllib.error.URLError as e:
-            reason_str = str(e.reason)
-            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:timeout",
-                            title="i18n:error_timeout",
-                            sub_title="i18n:error_timeout_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ],
-                    layout=layout,
-                )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:network",
-                        title="i18n:error_network",
-                        sub_title=reason_str,
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
-                layout=layout,
-            )
-        except TimeoutError:
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:timeout",
-                        title="i18n:error_timeout",
-                        sub_title="i18n:error_timeout_sub",
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
-                layout=layout,
-            )
+            check_data = await asyncio.to_thread(self._fetch_json_http, req)
         except Exception as e:
             return QueryResponse(
-                results=[
-                    Result(
-                        id="error:generic",
-                        title="Error checking bookmark",
-                        sub_title=str(e),
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ],
+                results=[self._error_result(e, "i18n:error_check_bookmark")],
                 layout=layout,
             )
 
@@ -1291,7 +1112,7 @@ class LinkdingPlugin(Plugin):
                 content_type="application/json",
             )
             try:
-                await asyncio.to_thread(self._fetch_bookmarks_http, req)
+                await asyncio.to_thread(self._fetch_json_http, req)
                 self._invalidate_data_caches()
                 if self.api:
                     msg = await self.api.get_translation(ctx, "notify_bookmark_created")
@@ -1310,7 +1131,7 @@ class LinkdingPlugin(Plugin):
 
         req_url = f"{self.linkding_url}/api/tags/"
         req = self._create_request(req_url)
-        resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        resp_data = await asyncio.to_thread(self._fetch_json_http, req)
         raw_tags = resp_data.get("results", [])
         tags = [t["name"] for t in raw_tags if isinstance(t, dict) and "name" in t]
         self._tag_cache = tags
@@ -1322,15 +1143,7 @@ class LinkdingPlugin(Plugin):
         if not prefix_query:
             return {}
 
-        now = time.time()
-        cached = self._cooccurring_tag_cache.get(prefix_query)
-        if cached is not None and (now - cached[0]) < self.COOCCURRING_TAG_CACHE_TTL:
-            return cached[1]
-
-        encoded_q = urllib.parse.quote(prefix_query)
-        req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit=100"
-        req = self._create_request(req_url)
-        resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        resp_data = await self._load_bookmarks(prefix_query, 100)
         bookmarks = resp_data.get("results", [])
 
         tag_counts: Dict[str, int] = {}
@@ -1338,7 +1151,6 @@ class LinkdingPlugin(Plugin):
             for tag in bm.get("tag_names", []):
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
-        self._cooccurring_tag_cache[prefix_query] = (now, tag_counts)
         return tag_counts
 
     async def _handle_tag_browsing(
@@ -1358,76 +1170,10 @@ class LinkdingPlugin(Plugin):
                 tags = list(tag_counts.keys())
             else:
                 tags = await self._get_tags(ctx)
-        except urllib.error.HTTPError as e:
-            await self._clear_status(ctx)
-            if e.code in (401, 403):
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:auth",
-                            title="i18n:error_auth_failed",
-                            sub_title="i18n:error_auth_failed_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ]
-                )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:api",
-                        title=f"Linkding API Error (HTTP {e.code})",
-                        sub_title=str(e.reason),
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ]
-            )
-        except urllib.error.URLError as e:
-            await self._clear_status(ctx)
-            reason_str = str(e.reason)
-            if "timed out" in reason_str.lower() or isinstance(e.reason, TimeoutError):
-                return QueryResponse(
-                    results=[
-                        Result(
-                            id="error:timeout",
-                            title="i18n:error_timeout",
-                            sub_title="i18n:error_timeout_sub",
-                            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        )
-                    ]
-                )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:network",
-                        title="i18n:error_network",
-                        sub_title=reason_str,
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ]
-            )
-        except TimeoutError:
-            await self._clear_status(ctx)
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="error:timeout",
-                        title="i18n:error_timeout",
-                        sub_title="i18n:error_timeout_sub",
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ]
-            )
         except Exception as e:
             await self._clear_status(ctx)
             return QueryResponse(
-                results=[
-                    Result(
-                        id="error:generic",
-                        title="Error fetching tags",
-                        sub_title=str(e),
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    )
-                ]
+                results=[self._error_result(e, "i18n:error_fetch_tags")],
             )
 
         selected_lower = {s.lower() for s in selected_tags} if selected_tags else set()
