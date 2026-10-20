@@ -40,7 +40,7 @@ class MockPublicAPI:
             "no_tags_found_sub": "No tags found in your Linkding instance",
             "no_matching_tags": "No matching tags",
             "tag_action_select": "Filter bookmarks by this tag",
-            "selection_bookmarks_found": "Linkding: {count} bookmarks found",
+            "selection_bookmarks_found": "{count} bookmarks found",
             "selection_press_enter_to_expand": "Press Enter to select a bookmark",
             "selection_press_enter_to_edit": "No bookmarks found · Press Enter to edit search terms",
             "selection_action_expand": "Expand Bookmark List",
@@ -54,15 +54,32 @@ class MockPublicAPI:
         self.toolbar_messages = []
         self.cleared_toolbar_msg_ids = []
         self.result_updates = []
+        self.result_updated = asyncio.Event()
         self.hidden_update_attempts = 0
+        self.accept_updates = True
+        self.visible = True
 
     async def update_result(self, ctx, result):
         import copy
+        if not self.accept_updates:
+            return False
         if self.hidden_update_attempts:
             self.hidden_update_attempts -= 1
             return False
         self.result_updates.append(copy.deepcopy(result))
+        self.result_updated.set()
         return True
+
+    async def is_visible(self, ctx):
+        return self.visible
+
+    async def wait_for_result_update(self, since=0):
+        while True:
+            updates = [update for update in self.result_updates[since:] if update.sub_title is not None]
+            if updates:
+                return updates[-1]
+            self.result_updated.clear()
+            await asyncio.wait_for(self.result_updated.wait(), timeout=2)
 
     async def get_setting(self, ctx: Context, key: str) -> str:
         self.setting_reads.append(key)
@@ -108,6 +125,19 @@ def extract_header_metadata(plugin_file_path: Path) -> dict:
             break
     json_text = "\n".join(header_lines)
     return json.loads(json_text)
+
+
+async def query_selection_and_wait(plugin, api, ctx, query):
+    """Apply the host's background row update at the public launcher seam."""
+    since = len(api.result_updates)
+    response = await plugin.query(ctx, query)
+    update = await api.wait_for_result_update(since)
+    result = response.results[0]
+    for field in ("sub_title", "preview", "actions", "tails"):
+        value = getattr(update, field)
+        if value is not None:
+            setattr(result, field, value)
+    return response
 
 
 class TestPluginMetadata(unittest.TestCase):
@@ -203,6 +233,9 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("no_matching_tags", i18n[lang])
             self.assertIn("tag_action_select", i18n[lang])
             self.assertIn("selection_bookmarks_found", i18n[lang])
+            self.assertIn("selection_entry_title", i18n[lang])
+            self.assertIn("selection_searching", i18n[lang])
+            self.assertIn("selection_search_failed", i18n[lang])
             self.assertIn("selection_press_enter_to_expand", i18n[lang])
             self.assertIn("selection_press_enter_to_edit", i18n[lang])
             self.assertIn("selection_action_expand", i18n[lang])
@@ -714,22 +747,76 @@ class TestBookmarkFavicons(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
 
         with patch("urllib.request.urlopen", side_effect=self._urlopen):
-            response = await self.plugin.query(self.ctx, self._query(selection=True))
+            response = await query_selection_and_wait(self.plugin, self.api, self.ctx, self._query(selection=True))
             initial = WoxPreviewListData.from_json(json.loads(response.results[0].preview.preview_data))
             self.assertEqual(initial.items[0].icon.image_type, WoxImageType.SVG)
             await self._finish_images()
-            update = self.api.result_updates[0]
+            update = self.api.result_updates[-1]
             self.assertEqual(update.id, "selection:bookmarks")
             self.assertIsNone(update.icon)
             preview = WoxPreviewListData.from_json(json.loads(update.preview.preview_data))
             self.assertEqual(preview.items[0].icon.image_type, WoxImageType.BASE64)
             self.assertEqual(preview.items[0].title, "Python")
             self.assertEqual(preview.items[0].tails[0]["Text"], "#dev")
-            cached = await self.plugin.query(self.ctx, self._query(selection=True))
+            cached = await query_selection_and_wait(self.plugin, self.api, self.ctx, self._query(selection=True))
             cached_preview = WoxPreviewListData.from_json(json.loads(cached.results[0].preview.preview_data))
             self.assertEqual(cached_preview.items[0].icon.image_type, WoxImageType.BASE64)
             self.assertEqual(cached.results[0].icon.image_data, self.module.LINKDING_ICON_SVG)
             self.assertEqual(len(self.image_requests), 1)
+
+    async def test_selection_icons_wait_for_initial_content_update(self):
+        from unittest.mock import patch
+
+        started, release, downloaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        class DelayedUpdateAPI(MockPublicAPI):
+            async def update_result(self, ctx, result):
+                if result.sub_title is not None:
+                    started.set()
+                    await release.wait()
+                return await super().update_result(ctx, result)
+
+        api = DelayedUpdateAPI(self.api.settings)
+        await self.plugin.init(self.ctx, PluginInitParams(api=api, plugin_directory=str(Path.cwd())))
+
+        def urlopen(request, **kwargs):
+            response = self._urlopen(request, **kwargs)
+            if "/api/bookmarks/" not in request.full_url:
+                loop.call_soon_threadsafe(downloaded.set)
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            try:
+                await self.plugin.query(self.ctx, self._query(selection=True))
+                await asyncio.wait_for(started.wait(), timeout=1)
+                await asyncio.wait_for(downloaded.wait(), timeout=1)
+                images = asyncio.create_task(self._finish_images())
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(images), timeout=0.05)
+                self.assertEqual(api.result_updates, [])
+            finally:
+                release.set()
+            await api.wait_for_result_update()
+            await images
+        self.assertEqual(len(api.result_updates), 2)
+        self.assertIsNotNone(api.result_updates[0].sub_title)
+        self.assertIsNone(api.result_updates[1].sub_title)
+        preview = json.loads(api.result_updates[1].preview.preview_data)
+        self.assertEqual(preview["items"][0]["icon"]["ImageType"], "base64")
+
+    async def test_selection_settings_change_discards_pending_icon_update(self):
+        from unittest.mock import patch
+
+        self.image_gate.clear()
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            try:
+                await query_selection_and_wait(self.plugin, self.api, self.ctx, self._query(selection=True))
+                await self.api.setting_changed_callbacks[0](self.ctx, "max_results", "5")
+            finally:
+                self.image_gate.set()
+                await self._finish_images()
+        self.assertEqual(len(self.api.result_updates), 1)
 
     async def test_duplicate_bookmark_icons_for_input_and_selection(self):
         from unittest.mock import patch
@@ -1634,6 +1721,288 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             search="",
         )
 
+    async def test_selection_entry_appears_before_network_and_updates_in_place(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+
+        gate = threading.Event()
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def urlopen(request, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            gate.wait(timeout=2)
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({
+                "count": 1, "results": [{"id": 7, "url": "https://example.com", "title": "Example"}]
+            }).encode()
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen) as http:
+            try:
+                self.mock_api.setting_reads.clear()
+                response = await asyncio.wait_for(self.plugin.query(
+                    self.ctx, self._make_selection_query(Selection(type=SelectionType.TEXT, text="Example"))
+                ), timeout=0.5)
+                entry = response.results[0]
+                self.assertEqual(entry.id, "selection:bookmarks")
+                self.assertEqual(entry.title, "i18n:selection_entry_title")
+                self.assertEqual(entry.sub_title, "i18n:selection_searching")
+                self.assertEqual(self.mock_api.setting_reads, [])
+                await asyncio.wait_for(started.wait(), timeout=1)
+                self.assertEqual(self.mock_api.result_updates, [])
+            finally:
+                gate.set()
+            update = await self.mock_api.wait_for_result_update()
+            self.assertEqual(update.id, entry.id)
+            self.assertIsNone(update.title)
+            self.assertEqual(len(json.loads(update.preview.preview_data)["items"]), 1)
+            self.assertEqual(http.call_count, 1)
+
+    async def test_loading_entry_enter_reuses_pending_request(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        gate = threading.Event()
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        self.mock_api.settings["TriggerKeywords"] = '["bookmarks"]'
+
+        def urlopen(request, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            gate.wait(timeout=2)
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({
+                "count": 1, "results": [{"id": 7, "url": "https://example.com", "title": "Example"}]
+            }).encode()
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen) as http:
+            try:
+                response = await self.plugin.query(
+                    self.ctx, self._make_selection_query(Selection(type=SelectionType.TEXT, text="Example"))
+                )
+                await asyncio.wait_for(started.wait(), timeout=1)
+                action = response.results[0].actions[0]
+                self.assertTrue(action.prevent_hide_after_action)
+                expand = asyncio.create_task(action.action(self.ctx, ActionContext()))
+                await asyncio.sleep(0)
+                self.assertFalse(expand.done())
+                self.assertEqual(self.mock_api.changed_queries, [])
+            finally:
+                gate.set()
+            await asyncio.wait_for(expand, timeout=1)
+            self.assertEqual(self.mock_api.changed_queries[0].query_text, "bookmarks Example")
+            expanded = await self.plugin.query(self.ctx, Query(
+                id="expanded", type=QueryType.INPUT, raw_query="bookmarks Example", search="Example",
+                selection=None, env=QueryEnv(), trigger_keyword="bookmarks", command="",
+            ))
+            self.assertEqual(expanded.results[0].id, "bookmark:7")
+            self.assertEqual(http.call_count, 1)
+
+    async def test_new_selection_cancels_old_update_and_pending_expansion(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        gate = threading.Event()
+        started, finished = asyncio.Event(), asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def urlopen(request, **kwargs):
+            old = "q=old" in request.full_url
+            if old:
+                loop.call_soon_threadsafe(started.set)
+                gate.wait(timeout=2)
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({
+                "count": 1, "results": [{"id": 1, "url": "https://example.com", "title": "old" if old else "new"}]
+            }).encode()
+            if old:
+                loop.call_soon_threadsafe(finished.set)
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            try:
+                old = await self.plugin.query(
+                    self.ctx, self._make_selection_query(Selection(type=SelectionType.TEXT, text="old"))
+                )
+                await asyncio.wait_for(started.wait(), timeout=1)
+                expand = asyncio.create_task(old.results[0].actions[0].action(self.ctx, ActionContext()))
+                await asyncio.sleep(0)
+                new = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx,
+                    self._make_selection_query(Selection(type=SelectionType.TEXT, text="new")))
+                await asyncio.wait_for(expand, timeout=1)
+            finally:
+                gate.set()
+            await asyncio.wait_for(finished.wait(), timeout=1)
+            self.assertEqual(self.mock_api.changed_queries, [])
+            updates = [update for update in self.mock_api.result_updates if update.sub_title is not None]
+            self.assertEqual(len(updates), 1)
+            self.assertEqual(new.results[0].id, old.results[0].id)
+            self.assertEqual(json.loads(updates[0].preview.preview_data)["items"][0]["title"], "new")
+
+    async def test_leaving_or_settings_change_discards_pending_selection(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        for key, value in [
+            ("leave", ""), ("linkding_url", "https://other.example.com"),
+            ("api_token", "replacement"), ("max_results", "5"),
+        ]:
+            with self.subTest(change=key):
+                gate = threading.Event()
+                started, finished = asyncio.Event(), asyncio.Event()
+                loop = asyncio.get_running_loop()
+                requests = []
+                since = len(self.mock_api.result_updates)
+
+                def urlopen(request, **kwargs):
+                    requests.append(request)
+                    old = len(requests) == 1
+                    if old:
+                        loop.call_soon_threadsafe(started.set)
+                        gate.wait(timeout=2)
+                    response = MagicMock()
+                    response.__enter__.return_value = response
+                    response.read.return_value = json.dumps({
+                        "count": 1, "results": [{"id": 1 if old else 2, "url": "https://example.com"}]
+                    }).encode()
+                    if old:
+                        loop.call_soon_threadsafe(finished.set)
+                    return response
+
+                with patch("urllib.request.urlopen", side_effect=urlopen):
+                    try:
+                        response = await self.plugin.query(self.ctx, self._make_selection_query(
+                            Selection(type=SelectionType.TEXT, text="Example")))
+                        await asyncio.wait_for(started.wait(), timeout=1)
+                        expand = asyncio.create_task(response.results[0].actions[0].action(self.ctx, ActionContext()))
+                        await asyncio.sleep(0)
+                        if key == "leave":
+                            await self.mock_api.leave_plugin_query_callbacks[0](self.ctx)
+                        else:
+                            await self.mock_api.setting_changed_callbacks[0](self.ctx, key, value)
+                    finally:
+                        gate.set()
+                    await asyncio.wait_for(expand, timeout=1)
+                    await asyncio.wait_for(finished.wait(), timeout=1)
+                    fresh = await self.plugin.query(self.ctx, Query(
+                        id="input", type=QueryType.INPUT, raw_query="ld Example", search="Example",
+                        selection=None, env=QueryEnv(), trigger_keyword="ld", command="",
+                    ))
+                self.assertEqual(self.mock_api.result_updates[since:], [])
+                self.assertEqual(self.mock_api.changed_queries, [])
+                self.assertEqual(fresh.results[0].id, "bookmark:2")
+                self.assertEqual(len(requests), 2)
+
+    async def test_selection_update_retries_until_entry_is_visible(self):
+        from unittest.mock import MagicMock, patch
+
+        self.mock_api.hidden_update_attempts = 1
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"count": 0, "results": []}'
+        with patch("urllib.request.urlopen", return_value=response):
+            result = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx,
+                self._make_selection_query(Selection(type=SelectionType.TEXT, text="Example")))
+        self.assertEqual(result.results[0].sub_title, "i18n:selection_press_enter_to_edit")
+        self.assertEqual(len(self.mock_api.result_updates), 1)
+
+    async def test_pending_expansion_does_not_reopen_a_departed_host_query(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        for hidden in (False, True):
+            with self.subTest(hidden=hidden):
+                gate = threading.Event()
+                started = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                self.mock_api.visible = True
+                self.mock_api.accept_updates = True
+
+                def urlopen(request, **kwargs):
+                    loop.call_soon_threadsafe(started.set)
+                    gate.wait(timeout=2)
+                    response = MagicMock()
+                    response.__enter__.return_value = response
+                    response.read.return_value = b'{"count": 0, "results": []}'
+                    return response
+
+                with patch("urllib.request.urlopen", side_effect=urlopen):
+                    try:
+                        response = await self.plugin.query(self.ctx, self._make_selection_query(
+                            Selection(type=SelectionType.TEXT, text="Example")))
+                        await asyncio.wait_for(started.wait(), timeout=1)
+                        expand = asyncio.create_task(response.results[0].actions[0].action(self.ctx, ActionContext()))
+                        await asyncio.sleep(0)
+                        # Global selection queries may not get a plugin-leave callback.
+                        self.mock_api.visible = not hidden
+                        self.mock_api.accept_updates = hidden
+                    finally:
+                        gate.set()
+                    await asyncio.wait_for(expand, timeout=1)
+                self.assertEqual(self.mock_api.changed_queries, [])
+
+    async def test_new_query_during_visibility_check_cancels_pending_expansion(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class DelayedVisibilityAPI(MockPublicAPI):
+            async def is_visible(self, ctx):
+                started.set()
+                await release.wait()
+                return True
+
+        api = DelayedVisibilityAPI(self.mock_api.settings)
+        await self.plugin.init(self.ctx, PluginInitParams(api=api, plugin_directory=str(Path.cwd())))
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"count": 0, "results": []}'
+        with patch("urllib.request.urlopen", return_value=response):
+            try:
+                loading = await self.plugin.query(self.ctx, self._make_selection_query(
+                    Selection(type=SelectionType.TEXT, text="Example")))
+                expand = asyncio.create_task(loading.results[0].actions[0].action(self.ctx, ActionContext()))
+                await asyncio.wait_for(started.wait(), timeout=1)
+                await self.plugin.query(self.ctx, Query(
+                    id="new", type=QueryType.INPUT, raw_query="ld ", search="",
+                    selection=None, env=QueryEnv(), trigger_keyword="ld", command="",
+                ))
+            finally:
+                release.set()
+            await asyncio.wait_for(expand, timeout=1)
+        self.assertEqual(api.changed_queries, [])
+
+    async def test_selection_errors_update_the_existing_entry(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        errors = [
+            (urllib.error.HTTPError("https://example.com", 401, "Unauthorized", {}, None), "i18n:error_auth_failed"),
+            (urllib.error.HTTPError("https://example.com", 500, "Server Error", {}, None), "i18n:selection_search_failed"),
+            (urllib.error.URLError("offline"), "i18n:error_network"),
+            (TimeoutError("timed out"), "i18n:error_timeout"),
+        ]
+        for error, subtitle in errors:
+            with self.subTest(error=subtitle), patch("urllib.request.urlopen", side_effect=error):
+                response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx,
+                    self._make_selection_query(Selection(type=SelectionType.TEXT, text="Example")))
+                entry = response.results[0]
+                self.assertEqual(entry.id, "selection:bookmarks")
+                self.assertEqual(entry.title, "i18n:selection_entry_title")
+                self.assertEqual(entry.sub_title, subtitle)
+                self.assertEqual(entry.actions, [])
+                self.assertTrue(all(update.title is None for update in self.mock_api.result_updates))
+
     async def test_selection_query_plain_text_search_aggregated(self):
         from unittest.mock import MagicMock, patch
         from wox_plugin import ActionContext
@@ -1665,13 +2034,13 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         query = self._make_selection_query(selection)
 
         with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
-            response = await self.plugin.query(self.ctx, query)
+            response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
 
             # 1. Consolidated single aggregation item
             self.assertEqual(len(response.results), 1)
             res = response.results[0]
-            self.assertEqual(res.title, "Linkding: 2 bookmarks found")
-            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_expand")
+            self.assertEqual(res.title, "i18n:selection_entry_title")
+            self.assertEqual(res.sub_title, "2 bookmarks found · Press Enter to select a bookmark")
 
             # 2. Split layout ratio 0.6
             self.assertIsNotNone(response.layout)
@@ -1726,11 +2095,11 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         query = self._make_selection_query(selection)
 
         with patch("urllib.request.urlopen", return_value=mock_http_response):
-            response = await self.plugin.query(self.ctx, query)
+            response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
 
             self.assertEqual(len(response.results), 1)
             res = response.results[0]
-            self.assertEqual(res.title, "i18n:no_bookmarks_found")
+            self.assertEqual(res.title, "i18n:selection_entry_title")
             self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_edit")
 
             # Split layout ratio 0.6 and List preview
@@ -1777,11 +2146,11 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         query = self._make_selection_query(Selection(type=SelectionType.TEXT, text="Wox guide"))
 
         with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
-            response = await self.plugin.query(self.ctx, query)
+            response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
             self.assertEqual(len(response.results), 1)
             entry = response.results[0]
             self.assertEqual(entry.id, "selection:bookmarks")
-            self.assertEqual(entry.sub_title, "i18n:selection_press_enter_to_expand")
+            self.assertEqual(entry.sub_title, "1 bookmarks found · Press Enter to select a bookmark")
             self.assertEqual([action.name for action in entry.actions], [
                 "i18n:selection_action_expand", "i18n:action_open_in_linkding"
             ])
@@ -1839,7 +2208,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 query = self._make_selection_query(Selection(type=SelectionType.TEXT, text="Wox guide"))
 
                 with patch("urllib.request.urlopen", return_value=mock_http_response):
-                    response = await self.plugin.query(self.ctx, query)
+                    response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
                 self.assertEqual(len(response.results), 1)
                 self.assertEqual(self.mock_api.setting_reads, ["TriggerKeywords"])
                 # Enter uses the resolved configuration without another host read.
@@ -1855,7 +2224,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
 
                 # The next aggregation query picks up configuration changes.
                 with patch("urllib.request.urlopen", return_value=mock_http_response):
-                    response = await self.plugin.query(self.ctx, query)
+                    response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
                 await response.results[0].actions[0].action(self.ctx, ActionContext())
                 self.assertEqual(self.mock_api.changed_queries[-1].query_text, "bm Wox guide")
                 self.assertEqual(self.mock_api.setting_reads, ["TriggerKeywords", "TriggerKeywords"])
@@ -2285,7 +2654,7 @@ class TestResultIdStabilityAndSemantics(unittest.IsolatedAsyncioTestCase):
             search="",
         )
         with patch("urllib.request.urlopen", return_value=mock_resp):
-            response = await self.plugin.query(self.ctx, query)
+            response = await query_selection_and_wait(self.plugin, self.mock_api, self.ctx, query)
             self.assertEqual(len(response.results), 1)
             self.assertEqual(response.results[0].id, "selection:bookmarks")
 

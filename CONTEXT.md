@@ -21,7 +21,7 @@ A stored artifact associated with a bookmark, such as an archived HTML snapshot 
 _Avoid_: Attachment, snapshot, download, media
 
 **Selection Aggregation Entry**:
-A single launcher entry summarizing bookmark matches for selected text, including an empty result, while preserving space for other plugins in selection menus.
+A persistent launcher entry representing the bookmark search for selected text, including loading, matched, empty, and failed states, while preserving space for other plugins in selection menus.
 _Avoid_: Group, folder, category result
 
 **Preview Panel**:

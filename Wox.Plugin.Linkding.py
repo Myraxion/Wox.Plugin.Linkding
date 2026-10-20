@@ -52,7 +52,10 @@
 #       "no_tags_found_sub": "No tags found in your Linkding instance",
 #       "no_matching_tags": "No matching tags",
 #       "tag_action_select": "Filter bookmarks by this tag",
-#       "selection_bookmarks_found": "Linkding: {count} bookmarks found",
+#       "selection_entry_title": "Linkding Bookmarks",
+#       "selection_searching": "Searching bookmarks…",
+#       "selection_search_failed": "Bookmark search failed",
+#       "selection_bookmarks_found": "{count} bookmarks found",
 #       "selection_press_enter_to_expand": "Press Enter to select a bookmark",
 #       "selection_press_enter_to_edit": "No bookmarks found · Press Enter to edit search terms",
 #       "selection_action_expand": "Expand Bookmark List",
@@ -90,7 +93,10 @@
 #       "no_tags_found_sub": "Linkding 实例中暂无标签",
 #       "no_matching_tags": "未找到匹配的标签",
 #       "tag_action_select": "按回车筛选此标签下的书签",
-#       "selection_bookmarks_found": "Linkding: 找到 {count} 个相关书签",
+#       "selection_entry_title": "Linkding 书签",
+#       "selection_searching": "正在查询书签…",
+#       "selection_search_failed": "书签查询失败",
+#       "selection_bookmarks_found": "找到 {count} 个相关书签",
 #       "selection_press_enter_to_expand": "按回车选择书签",
 #       "selection_press_enter_to_edit": "未找到书签 · 按回车修改搜索词",
 #       "selection_action_expand": "展开书签列表",
@@ -284,6 +290,7 @@ class LinkdingPlugin(Plugin):
         self._last_bookmark_query: str = ""
         self._last_bookmarks: List[Dict[str, Any]] = []
         self._query_generation = 0
+        self._selection_search: Optional[asyncio.Task[Optional[Result]]] = None
         self._favicon_cache: Dict[str, tuple[float, Optional[WoxImage]]] = {}
         self._favicon_downloads: Dict[str, asyncio.Task[Optional[WoxImage]]] = {}
         self._favicon_refreshes: set[asyncio.Task[None]] = set()
@@ -326,7 +333,13 @@ class LinkdingPlugin(Plugin):
 
     async def _on_leave_plugin_query(self, ctx: Context) -> None:
         self._query_generation += 1
+        self._cancel_selection_search()
         await self._clear_status(ctx)
+
+    def _cancel_selection_search(self) -> None:
+        if self._selection_search and not self._selection_search.done():
+            self._selection_search.cancel()
+        self._selection_search = None
 
     async def _show_status(self, ctx: Context, text: str) -> None:
         if self.api and hasattr(self.api, "show_toolbar_msg"):
@@ -342,8 +355,10 @@ class LinkdingPlugin(Plugin):
             await self.api.clear_toolbar_msg(ctx, self.TOOLBAR_MSG_ID)
 
     async def _on_setting_changed(self, ctx: Context, key: str, value: str) -> None:
-        if key in ("linkding_url", "api_token"):
+        if key in ("linkding_url", "api_token", "max_results"):
             self._query_generation += 1
+            self._cancel_selection_search()
+        if key in ("linkding_url", "api_token"):
             self._favicon_cache.clear()
             for task in self._favicon_downloads.values():
                 task.cancel()
@@ -371,6 +386,7 @@ class LinkdingPlugin(Plugin):
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
         self._query_generation += 1
+        self._cancel_selection_search()
         generation = self._query_generation
         response = await self._query(ctx, query)
         self._prepare_favicons(ctx, response, generation)
@@ -380,7 +396,10 @@ class LinkdingPlugin(Plugin):
         url = bookmark.get("favicon_url")
         return WoxImage.new_url(url) if url else WoxImage.new_svg(LINKDING_ICON_SVG)
 
-    def _prepare_favicons(self, ctx: Context, response: QueryResponse, generation: int) -> None:
+    def _prepare_favicons(
+        self, ctx: Context, response: QueryResponse, generation: int,
+        ready: Optional[asyncio.Event] = None,
+    ) -> None:
         # URL icons are internal markers until replaced with cached data or the
         # Linkding SVG. Never delegate the fallback to Wox's generic placeholder.
         for result in response.results:
@@ -408,16 +427,18 @@ class LinkdingPlugin(Plugin):
                 result.preview.preview_data = preview_data.to_json()
             if pending and generation == self._query_generation:
                 task = asyncio.create_task(
-                    self._refresh_favicons(ctx, result, preview_data, pending, generation)
+                    self._refresh_favicons(ctx, result, preview_data, pending, generation, ready)
                 )
                 self._favicon_refreshes.add(task)
                 task.add_done_callback(self._favicon_refreshes.discard)
 
     async def _refresh_favicons(
         self, ctx: Context, result: Result, preview_data: Optional[WoxPreviewListData],
-        pending: List[tuple[WoxImage, str]], generation: int,
+        pending: List[tuple[WoxImage, str]], generation: int, ready: Optional[asyncio.Event] = None,
     ) -> None:
         images = await asyncio.gather(*(self._get_favicon(url) for _, url in pending))
+        if ready is not None:
+            await ready.wait()
         if generation != self._query_generation or not self.api:
             return
         changed = False
@@ -429,23 +450,29 @@ class LinkdingPlugin(Plugin):
             return
         if preview_data:
             result.preview.preview_data = preview_data.to_json()
+        update = UpdatableResult(
+            id=result.id,
+            icon=result.icon if any(icon is result.icon for icon, _ in pending) else None,
+            preview=result.preview if preview_data else None,
+        )
+        await self._update_visible_result(ctx, update, generation)
+
+    async def _update_visible_result(self, ctx: Context, update: UpdatableResult, generation: int) -> bool:
+        if not self.api:
+            return False
         try:
-            update = UpdatableResult(
-                id=result.id,
-                icon=result.icon if any(icon is result.icon for icon, _ in pending) else None,
-                preview=result.preview if preview_data else None,
-            )
             # A fast download can finish before Wox has displayed the initial
             # response. Retry briefly without refreshing or reopening the query.
             for _ in range(5):
                 if generation != self._query_generation:
-                    return
+                    return False
                 if await self.api.update_result(ctx, update):
-                    return
+                    return True
                 await asyncio.sleep(0.1)
         except Exception:
             # A closed launcher or disconnected host must not break future queries.
-            return
+            return False
+        return False
 
     async def _get_favicon(self, url: str) -> Optional[WoxImage]:
         cached = self._favicon_cache.get(url)
@@ -549,7 +576,6 @@ class LinkdingPlugin(Plugin):
                 )
 
         if is_selection:
-            await self._clear_status(ctx)
             return await self._handle_selection_bookmark_search(ctx, query, search_text)
 
         return await self._search_bookmarks(ctx, search_text)
@@ -725,6 +751,89 @@ class LinkdingPlugin(Plugin):
     async def _handle_selection_bookmark_search(
         self, ctx: Context, query: Query, search_text: str
     ) -> QueryResponse:
+        generation = self._query_generation
+        task = asyncio.create_task(self._refresh_selection_bookmark_search(ctx, query, search_text, generation))
+        self._selection_search = task
+
+        async def expand(ctx: Context, action_ctx: ActionContext) -> None:
+            try:
+                result = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                return
+            if result and result.actions and generation == self._query_generation and self.api:
+                if not await self.api.is_visible(ctx) or generation != self._query_generation:
+                    return
+                action = result.actions[0].action
+                if action:
+                    await action(ctx, action_ctx)
+
+        preview = WoxPreview(
+            preview_type=WoxPreviewType.LIST,
+            preview_data=WoxPreviewListData(items=[WoxPreviewListItem(
+                title="i18n:selection_searching", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+            )]).to_json(),
+        )
+        return QueryResponse(
+            results=[Result(
+                id="selection:bookmarks",
+                title="i18n:selection_entry_title",
+                sub_title="i18n:selection_searching",
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                preview=preview,
+                actions=[
+                    ResultAction(
+                        name="i18n:selection_action_expand", icon=WoxImage.new_svg(ACTION_SEARCH_SVG),
+                        is_default=True, prevent_hide_after_action=True, action=expand,
+                    ),
+                    ResultAction(
+                        name="i18n:action_open_in_linkding", icon=WoxImage.new_svg(ACTION_OPEN_SVG),
+                        action=self._create_open_url_action(
+                            f"{self.linkding_url}/bookmarks?q={urllib.parse.quote(search_text)}"
+                        ),
+                    ),
+                ],
+            )],
+            layout=QueryLayout(result_preview_width_ratio=0.6),
+        )
+
+    async def _refresh_selection_bookmark_search(
+        self, ctx: Context, query: Query, search_text: str, generation: int,
+    ) -> Optional[Result]:
+        ready = asyncio.Event()
+        try:
+            try:
+                await self._clear_status(ctx)
+                response = await self._load_selection_bookmark_search(ctx, query, search_text)
+            except Exception:
+                response = QueryResponse(results=[Result(
+                    id="error:generic", title="i18n:selection_search_failed",
+                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                )])
+            if generation != self._query_generation:
+                return None
+            result = response.results[0]
+            if result.id.startswith("error:"):
+                status = result.title if result.title.startswith("i18n:") else "i18n:selection_search_failed"
+                result.sub_title = status
+                result.preview = WoxPreview(
+                    preview_type=WoxPreviewType.LIST,
+                    preview_data=WoxPreviewListData(items=[WoxPreviewListItem(title=status)]).to_json(),
+                )
+            result.id = "selection:bookmarks"
+            result.title = "i18n:selection_entry_title"
+            self._prepare_favicons(ctx, response, generation, ready)
+            updated = await self._update_visible_result(ctx, UpdatableResult(
+                id=result.id, sub_title=result.sub_title, preview=result.preview,
+                actions=result.actions,
+            ), generation)
+            return result if updated else None
+        finally:
+            # Image updates must follow the initial preview update.
+            ready.set()
+
+    async def _load_selection_bookmark_search(
+        self, ctx: Context, query: Query, search_text: str
+    ) -> QueryResponse:
         layout = QueryLayout(result_preview_width_ratio=0.6)
         encoded_q = urllib.parse.quote(search_text)
         req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={self.max_results}"
@@ -890,12 +999,17 @@ class LinkdingPlugin(Plugin):
         except Exception:
             title = f"Linkding: {count} bookmarks found"
 
+        expand_hint = (
+            await self.api.get_translation(ctx, "selection_press_enter_to_expand")
+            if self.api else "Press Enter to select a bookmark"
+        )
+
         return QueryResponse(
             results=[
                 Result(
                     id="selection:bookmarks",
                     title=title,
-                    sub_title="i18n:selection_press_enter_to_expand",
+                    sub_title=f"{title} · {expand_hint}",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     preview=preview,
                     actions=actions,
