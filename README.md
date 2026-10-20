@@ -30,6 +30,11 @@
 
 - 🔍 **Instant Bookmark Search**
   - Type `ld <keyword>` to perform full-text search across bookmark titles, descriptions, and URLs.
+- 🖼️ **Website Favicons**
+  - Bookmarks use the favicon saved by Linkding in search results, tag-filtered results, selection previews, and duplicate checks.
+  - Results appear immediately with the Linkding icon; favicons load in the background and replace it in place. Missing icons, download errors, and non-image responses keep the Linkding icon.
+  - Successful downloads and failures are cached in memory for 300 seconds. Changing the Linkding URL or API token clears this cache.
+  - Image decoding is handled by Wox; downloaded but corrupt image files may still show Wox's generic placeholder.
 - ⚡ **Multi-Action Interaction**
   - **Default Action (Enter)**: Open the bookmark directly in your default browser.
   - **Copy Link**: Copy the bookmark URL to the system clipboard in one click.

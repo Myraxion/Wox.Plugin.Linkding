@@ -52,6 +52,16 @@ class MockPublicAPI:
         self.leave_plugin_query_callbacks = []
         self.toolbar_messages = []
         self.cleared_toolbar_msg_ids = []
+        self.result_updates = []
+        self.hidden_update_attempts = 0
+
+    async def update_result(self, ctx, result):
+        import copy
+        if self.hidden_update_attempts:
+            self.hidden_update_attempts -= 1
+            return False
+        self.result_updates.append(copy.deepcopy(result))
+        return True
 
     async def get_setting(self, ctx: Context, key: str) -> str:
         return self.settings.get(key, "")
@@ -535,6 +545,278 @@ class TestBookmarkSearch(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.title, "i18n:error_timeout")
             self.assertEqual(res.sub_title, "i18n:error_timeout_sub")
 
+
+
+class TestBookmarkFavicons(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import base64
+        import importlib.util
+        import sys
+        import threading
+
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        spec = importlib.util.spec_from_file_location("linkding_favicons", plugin_file)
+        self.module = importlib.util.module_from_spec(spec)
+        sys.modules["linkding_favicons"] = self.module
+        spec.loader.exec_module(self.module)
+        self.plugin = self.module.LinkdingPlugin()
+        self.api = MockPublicAPI({
+            "linkding_url": "https://linkding.example.com",
+            "api_token": "secret_token",
+        })
+        self.ctx = Context()
+        await self.plugin.init(self.ctx, PluginInitParams(api=self.api, plugin_directory=str(Path.cwd())))
+        self.bookmarks = [{
+            "id": 1, "title": "Python", "url": "https://python.org",
+            "tag_names": ["dev"],
+            "favicon_url": "https://linkding.example.com/static/python.png",
+        }]
+        self.png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+        )
+        self.image_data = self.png
+        self.image_type = "image/png"
+        self.image_error = None
+        self.image_requests = []
+        self.image_gate = threading.Event()
+        self.image_gate.set()
+
+    def _query(self, text="python", selection=False):
+        return Query(
+            id="q_favicon", type=QueryType.SELECTION if selection else QueryType.INPUT,
+            raw_query=f"ld {text}", search=text, trigger_keyword="ld", command="",
+            selection=Selection(type=SelectionType.TEXT, text=text) if selection else Selection(),
+            env=QueryEnv(),
+        )
+
+    def _urlopen(self, request, **kwargs):
+        from email.message import Message
+        from unittest.mock import MagicMock
+
+        response = MagicMock()
+        response.__enter__.return_value = response
+        if "/api/bookmarks/" in request.full_url:
+            payload = (
+                {"bookmark": self.bookmarks[0]}
+                if "/check/" in request.full_url
+                else {"count": len(self.bookmarks), "results": self.bookmarks}
+            )
+            response.read.return_value = json.dumps(payload).encode()
+        else:
+            self.image_requests.append(request)
+            self.image_gate.wait(timeout=5)
+            if self.image_error:
+                raise self.image_error
+            response.read.return_value = self.image_data
+            response.headers = Message()
+            response.headers["Content-Type"] = self.image_type
+        return response
+
+    async def _finish_images(self):
+        # Synchronize background work; assertions below stay at the launcher/API seam.
+        await asyncio.gather(*tuple(self.plugin._favicon_refreshes))
+
+    async def test_nonblocking_download_updates_rows_and_reuses_cached_image(self):
+        from unittest.mock import patch
+        from wox_plugin import ActionContext
+
+        self.bookmarks.append(dict(self.bookmarks[0], id=2))
+        self.image_gate.clear()
+        with patch("urllib.request.urlopen", side_effect=self._urlopen), \
+             patch("webbrowser.open") as open_url:
+            try:
+                response = await asyncio.wait_for(self.plugin.query(self.ctx, self._query()), timeout=1)
+                self.assertTrue(all(r.icon.image_type == WoxImageType.SVG for r in response.results))
+                self.assertEqual(self.api.result_updates, [])
+                await response.results[0].actions[0].action(self.ctx, ActionContext())
+                open_url.assert_called_once_with("https://python.org")
+            finally:
+                self.image_gate.set()
+                await self._finish_images()
+            self.assertEqual(len(self.image_requests), 1)
+            self.assertNotIn("Authorization", self.image_requests[0].headers)
+            self.assertEqual({u.id for u in self.api.result_updates}, {"bookmark:1", "bookmark:2"})
+            self.assertTrue(all(u.icon.image_type == WoxImageType.BASE64 for u in self.api.result_updates))
+            import base64
+            encoded = self.api.result_updates[0].icon.image_data.split(",", 1)[1]
+            self.assertEqual(base64.b64decode(encoded), self.png)
+            self.assertTrue(all(u.title is None and u.actions is None for u in self.api.result_updates))
+            cached = await self.plugin.query(self.ctx, self._query("#dev "))
+            await self._finish_images()
+            self.assertEqual(cached.results[0].icon.image_type, WoxImageType.BASE64)
+            self.assertEqual(len(self.image_requests), 1)
+
+    async def test_missing_favicon_uses_linkding_without_image_requests(self):
+        from unittest.mock import patch
+
+        self.bookmarks = [dict(self.bookmarks[0], id=index, favicon_url=value)
+                          for index, value in enumerate([None, ""])]
+        self.bookmarks.append({"id": 3, "url": "https://example.org"})
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            response = await self.plugin.query(self.ctx, self._query())
+            await self._finish_images()
+        self.assertTrue(all(r.icon.image_data == self.module.LINKDING_ICON_SVG for r in response.results))
+        self.assertEqual(self.image_requests, [])
+        self.assertEqual(self.api.result_updates, [])
+
+    async def test_download_errors_keep_linkding_and_cache_failure(self):
+        import http.client
+        import urllib.error
+        from unittest.mock import patch
+
+        errors = [
+            urllib.error.HTTPError("https://linkding.example.com/icon", 404, "Not found", {}, None),
+            urllib.error.URLError("offline"),
+            TimeoutError("timed out"),
+            http.client.IncompleteRead(b"partial image"),
+        ]
+        for index, error in enumerate(errors):
+            with self.subTest(error=type(error).__name__):
+                self.bookmarks[0]["favicon_url"] = f"https://linkding.example.com/static/{index}.png"
+                self.image_error = error
+                with patch("urllib.request.urlopen", side_effect=self._urlopen):
+                    response = await self.plugin.query(self.ctx, self._query(str(index)))
+                    await self._finish_images()
+                    cached = await self.plugin.query(self.ctx, self._query(str(index)))
+                    await self._finish_images()
+                self.assertEqual(response.results[0].icon.image_data, self.module.LINKDING_ICON_SVG)
+                self.assertEqual(cached.results[0].icon.image_data, self.module.LINKDING_ICON_SVG)
+        self.assertEqual(len(self.image_requests), len(errors))
+        self.assertEqual(self.api.result_updates, [])
+
+    async def test_svg_favicon_uses_native_svg_image(self):
+        from unittest.mock import patch
+
+        self.image_type = "image/svg+xml"
+        self.image_data = b'<svg xmlns="http://www.w3.org/2000/svg"><circle r="8"/></svg>'
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            await self.plugin.query(self.ctx, self._query())
+            await self._finish_images()
+        self.assertEqual(self.api.result_updates[0].icon.image_type, WoxImageType.SVG)
+        self.assertEqual(self.api.result_updates[0].icon.image_data, self.image_data.decode())
+
+    async def test_html_response_and_empty_image_keep_linkding(self):
+        from unittest.mock import patch
+
+        for index, (mime, data) in enumerate([("text/html", b"<html>Login</html>"), ("image/png", b"")]):
+            with self.subTest(mime=mime, data=data):
+                self.image_type, self.image_data = mime, data
+                self.bookmarks[0]["favicon_url"] = f"https://linkding.example.com/static/invalid{index}"
+                with patch("urllib.request.urlopen", side_effect=self._urlopen):
+                    response = await self.plugin.query(self.ctx, self._query(str(index)))
+                    await self._finish_images()
+                self.assertEqual(response.results[0].icon.image_data, self.module.LINKDING_ICON_SVG)
+        self.assertEqual(self.api.result_updates, [])
+
+    async def test_selection_preview_updates_bookmark_icons_only(self):
+        from unittest.mock import patch
+
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            response = await self.plugin.query(self.ctx, self._query(selection=True))
+            initial = WoxPreviewListData.from_json(json.loads(response.results[0].preview.preview_data))
+            self.assertEqual(initial.items[0].icon.image_type, WoxImageType.SVG)
+            await self._finish_images()
+            update = self.api.result_updates[0]
+            self.assertEqual(update.id, "selection:bookmarks")
+            self.assertIsNone(update.icon)
+            preview = WoxPreviewListData.from_json(json.loads(update.preview.preview_data))
+            self.assertEqual(preview.items[0].icon.image_type, WoxImageType.BASE64)
+            self.assertEqual(preview.items[0].title, "Python")
+            self.assertEqual(preview.items[0].tails[0]["Text"], "#dev")
+            cached = await self.plugin.query(self.ctx, self._query(selection=True))
+            cached_preview = WoxPreviewListData.from_json(json.loads(cached.results[0].preview.preview_data))
+            self.assertEqual(cached_preview.items[0].icon.image_type, WoxImageType.BASE64)
+            self.assertEqual(cached.results[0].icon.image_data, self.module.LINKDING_ICON_SVG)
+            self.assertEqual(len(self.image_requests), 1)
+
+    async def test_duplicate_bookmark_icons_for_input_and_selection(self):
+        from unittest.mock import patch
+
+        for selection in (False, True):
+            with self.subTest(selection=selection):
+                self.bookmarks[0]["favicon_url"] = f"https://linkding.example.com/static/{selection}.png"
+                with patch("urllib.request.urlopen", side_effect=self._urlopen):
+                    response = await self.plugin.query(self.ctx, self._query("https://python.org", selection))
+                    self.assertEqual(response.results[0].icon.image_type, WoxImageType.SVG)
+                    await self._finish_images()
+                self.assertEqual(self.api.result_updates[-1].id, "bookmark:1")
+                self.assertEqual(self.api.result_updates[-1].icon.image_type, WoxImageType.BASE64)
+
+    async def test_new_query_suppresses_old_update_and_shares_download(self):
+        from unittest.mock import patch
+
+        self.image_gate.clear()
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            try:
+                await self.plugin.query(self.ctx, self._query("first"))
+                await self.plugin.query(self.ctx, self._query("second"))
+            finally:
+                self.image_gate.set()
+                await self._finish_images()
+        self.assertEqual(len(self.image_requests), 1)
+        self.assertEqual(len(self.api.result_updates), 1)
+
+    async def test_leaving_query_prevents_background_update(self):
+        from unittest.mock import patch
+
+        self.image_gate.clear()
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            try:
+                await self.plugin.query(self.ctx, self._query())
+                await self.api.leave_plugin_query_callbacks[0](self.ctx)
+            finally:
+                self.image_gate.set()
+                await self._finish_images()
+        self.assertEqual(self.api.result_updates, [])
+
+    async def test_settings_and_ttl_invalidate_favicon_cache(self):
+        from unittest.mock import patch
+        import time
+
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            await self.plugin.query(self.ctx, self._query())
+            await self._finish_images()
+            for key, value in [("linkding_url", "https://other.example.com"), ("api_token", "new_token")]:
+                await self.api.setting_changed_callbacks[0](self.ctx, key, value)
+                response = await self.plugin.query(self.ctx, self._query())
+                self.assertEqual(response.results[0].icon.image_type, WoxImageType.SVG)
+                await self._finish_images()
+            future = time.time() + 301
+            with patch("time.time", return_value=future):
+                response = await self.plugin.query(self.ctx, self._query())
+                self.assertEqual(response.results[0].icon.image_type, WoxImageType.SVG)
+                await self._finish_images()
+        self.assertEqual(len(self.image_requests), 4)
+
+    async def test_fast_download_retries_until_initial_result_is_visible(self):
+        from unittest.mock import patch
+
+        self.api.hidden_update_attempts = 1
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            await self.plugin.query(self.ctx, self._query())
+            await self._finish_images()
+        self.assertEqual(len(self.api.result_updates), 1)
+        self.assertEqual(len(self.image_requests), 1)
+
+    async def test_settings_change_during_download_does_not_restore_old_cache(self):
+        from unittest.mock import patch
+
+        self.image_gate.clear()
+        with patch("urllib.request.urlopen", side_effect=self._urlopen):
+            try:
+                await self.plugin.query(self.ctx, self._query())
+                # Let the background download start before changing settings.
+                while not self.image_requests:
+                    await asyncio.sleep(0)
+                await self.api.setting_changed_callbacks[0](self.ctx, "api_token", "replacement")
+            finally:
+                self.image_gate.set()
+                await asyncio.gather(*tuple(self.plugin._favicon_refreshes), return_exceptions=True)
+            self.assertEqual(self.api.result_updates, [])
+            response = await self.plugin.query(self.ctx, self._query())
+            self.assertEqual(response.results[0].icon.image_type, WoxImageType.SVG)
+            await self._finish_images()
+        self.assertEqual(len(self.image_requests), 2)
 
 
 class TestBookmarkCreationAndDuplicateCheck(unittest.IsolatedAsyncioTestCase):

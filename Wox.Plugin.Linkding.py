@@ -187,6 +187,8 @@ Single-file Python SDK plugin integrating Wox launcher with Linkding.
 
 from typing import Any, Callable, Dict, List, Optional
 import asyncio
+import base64
+import http.client
 import json
 import re
 import time
@@ -215,7 +217,9 @@ from wox_plugin import (
     ResultTailType,
     SelectionType,
     ToolbarMsg,
+    UpdatableResult,
     WoxImage,
+    WoxImageType,
     WoxPreview,
     WoxPreviewListData,
     WoxPreviewListItem,
@@ -279,6 +283,11 @@ class LinkdingPlugin(Plugin):
         self.BOOKMARK_CACHE_TTL: float = 30.0
         self._last_bookmark_query: str = ""
         self._last_bookmarks: List[Dict[str, Any]] = []
+        self._query_generation = 0
+        self._favicon_cache: Dict[str, tuple[float, Optional[WoxImage]]] = {}
+        self._favicon_downloads: Dict[str, asyncio.Task[Optional[WoxImage]]] = {}
+        self._favicon_refreshes: set[asyncio.Task[None]] = set()
+        self.FAVICON_CACHE_TTL = 300.0
 
     TOOLBAR_MSG_ID = "linkding:status"
 
@@ -316,6 +325,7 @@ class LinkdingPlugin(Plugin):
         self.max_results = int(raw_max) if raw_max and raw_max.strip().isdigit() else 10
 
     async def _on_leave_plugin_query(self, ctx: Context) -> None:
+        self._query_generation += 1
         await self._clear_status(ctx)
 
     async def _show_status(self, ctx: Context, text: str) -> None:
@@ -332,6 +342,12 @@ class LinkdingPlugin(Plugin):
             await self.api.clear_toolbar_msg(ctx, self.TOOLBAR_MSG_ID)
 
     async def _on_setting_changed(self, ctx: Context, key: str, value: str) -> None:
+        if key in ("linkding_url", "api_token"):
+            self._query_generation += 1
+            self._favicon_cache.clear()
+            for task in self._favicon_downloads.values():
+                task.cancel()
+            self._favicon_downloads.clear()
         if key == "linkding_url":
             self.linkding_url = value.strip().rstrip("/") if value else ""
             self._tag_cache = None
@@ -354,6 +370,120 @@ class LinkdingPlugin(Plugin):
             self._bookmark_cache.clear()
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
+        self._query_generation += 1
+        generation = self._query_generation
+        response = await self._query(ctx, query)
+        self._prepare_favicons(ctx, response, generation)
+        return response
+
+    def _bookmark_icon(self, bookmark: Dict[str, Any]) -> WoxImage:
+        url = bookmark.get("favicon_url")
+        return WoxImage.new_url(url) if url else WoxImage.new_svg(LINKDING_ICON_SVG)
+
+    def _prepare_favicons(self, ctx: Context, response: QueryResponse, generation: int) -> None:
+        # URL icons are internal markers until replaced with cached data or the
+        # Linkding SVG. Never delegate the fallback to Wox's generic placeholder.
+        for result in response.results:
+            preview_data = (
+                WoxPreviewListData.from_json(json.loads(result.preview.preview_data))
+                if result.preview.preview_type == WoxPreviewType.LIST
+                else None
+            )
+            icons = [result.icon]
+            if preview_data:
+                icons.extend(item.icon for item in preview_data.items if item.icon)
+            pending: List[tuple[WoxImage, str]] = []
+            for icon in icons:
+                if icon.image_type != WoxImageType.URL:
+                    continue
+                url = icon.image_data
+                cached = self._favicon_cache.get(url)
+                fresh = cached is not None and time.time() - cached[0] < self.FAVICON_CACHE_TTL
+                replacement = cached[1] if fresh and cached else None
+                replacement = replacement or WoxImage.new_svg(LINKDING_ICON_SVG)
+                icon.image_type, icon.image_data = replacement.image_type, replacement.image_data
+                if not fresh:
+                    pending.append((icon, url))
+            if preview_data:
+                result.preview.preview_data = preview_data.to_json()
+            if pending and generation == self._query_generation:
+                task = asyncio.create_task(
+                    self._refresh_favicons(ctx, result, preview_data, pending, generation)
+                )
+                self._favicon_refreshes.add(task)
+                task.add_done_callback(self._favicon_refreshes.discard)
+
+    async def _refresh_favicons(
+        self, ctx: Context, result: Result, preview_data: Optional[WoxPreviewListData],
+        pending: List[tuple[WoxImage, str]], generation: int,
+    ) -> None:
+        images = await asyncio.gather(*(self._get_favicon(url) for _, url in pending))
+        if generation != self._query_generation or not self.api:
+            return
+        changed = False
+        for (icon, _), image in zip(pending, images):
+            if image:
+                icon.image_type, icon.image_data = image.image_type, image.image_data
+                changed = True
+        if not changed:
+            return
+        if preview_data:
+            result.preview.preview_data = preview_data.to_json()
+        try:
+            update = UpdatableResult(
+                id=result.id,
+                icon=result.icon if any(icon is result.icon for icon, _ in pending) else None,
+                preview=result.preview if preview_data else None,
+            )
+            # A fast download can finish before Wox has displayed the initial
+            # response. Retry briefly without refreshing or reopening the query.
+            for _ in range(5):
+                if generation != self._query_generation:
+                    return
+                if await self.api.update_result(ctx, update):
+                    return
+                await asyncio.sleep(0.1)
+        except Exception:
+            # A closed launcher or disconnected host must not break future queries.
+            return
+
+    async def _get_favicon(self, url: str) -> Optional[WoxImage]:
+        cached = self._favicon_cache.get(url)
+        if cached and time.time() - cached[0] < self.FAVICON_CACHE_TTL:
+            return cached[1]
+        task = self._favicon_downloads.get(url)
+        if task is None:
+            task = asyncio.create_task(self._download_favicon(url))
+            self._favicon_downloads[url] = task
+        return await asyncio.shield(task)
+
+    async def _download_favicon(self, url: str) -> Optional[WoxImage]:
+        try:
+            image = await asyncio.to_thread(self._fetch_favicon_http, url)
+            self._favicon_cache[url] = (time.time(), image)
+            return image
+        finally:
+            if self._favicon_downloads.get(url) is asyncio.current_task():
+                self._favicon_downloads.pop(url, None)
+
+    def _fetch_favicon_http(self, url: str) -> Optional[WoxImage]:
+        # Favicons are static resources, not API calls. In particular, never send
+        # the API token to a favicon URL or its redirects.
+        request = urllib.request.Request(url, headers={"Accept": "image/*", "User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                data = response.read()
+                mime = response.headers.get_content_type()
+            if not data or not mime.startswith("image/"):
+                return None
+            if mime == "image/svg+xml":
+                return WoxImage.new_svg(data.decode("utf-8"))
+            encoded = base64.b64encode(data).decode("ascii")
+            return WoxImage.new_base64(f"data:{mime};base64,{encoded}")
+        except (OSError, ValueError, http.client.HTTPException):
+            return None
+
+    async def _query(self, ctx: Context, query: Query) -> QueryResponse:
         is_selection = query.type == QueryType.SELECTION
         if is_selection:
             raw_search = (
@@ -584,7 +714,7 @@ class LinkdingPlugin(Plugin):
                     id=result_id,
                     title=title,
                     sub_title=sub_title,
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    icon=self._bookmark_icon(item),
                     score=initial_score,
                     actions=actions,
                 )
@@ -731,7 +861,7 @@ class LinkdingPlugin(Plugin):
             bm_url = bm.get("url", "")
             preview_items.append(
                 WoxPreviewListItem(
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    icon=self._bookmark_icon(bm),
                     title=bm_title,
                     subtitle=bm_url,
                     tails=tails,
@@ -993,7 +1123,7 @@ class LinkdingPlugin(Plugin):
                         id=result_id,
                         title=title,
                         sub_title=sub_title,
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        icon=self._bookmark_icon(existing_bookmark),
                         preview=preview,
                         actions=actions,
                     )
