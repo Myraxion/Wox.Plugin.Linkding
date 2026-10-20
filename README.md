@@ -45,7 +45,7 @@
   - Triggers Linkding server-side auto-scraping for title and description.
 - 📌 **Selection Query Support**
   - Select text or URLs in any browser or application and press the Wox Selection hotkey (e.g., `Win+Alt+Space`) to instantly interact with Linkding: recognized URLs trigger bookmark duplicate checking and saving, while plain text triggers bookmark search.
-  - Keyword matches appear in one entry with a read-only preview. Press Enter to expand into `ld <keyword>` and select a bookmark in Wox; even a single match expands first. With no matches, Enter lets you edit the search terms. `Ctrl+J` offers Linkding web search as a secondary action.
+  - Keyword matches appear in one entry with a read-only preview. Press Enter to expand using your configured trigger keyword (default: `ld <keyword>`) and select a bookmark in Wox; even a single match expands first. With no matches, Enter lets you edit the search terms. `Ctrl+J` offers Linkding web search as a secondary action.
 - 🌐 **Bilingual Support (i18n)**
   - Built-in English and Simplified Chinese localization; automatically adjusts to Wox system language preferences.
 - 🛡️ **Declarative Settings Validation**

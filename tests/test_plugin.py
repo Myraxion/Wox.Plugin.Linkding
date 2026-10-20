@@ -1338,7 +1338,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         params = PluginInitParams(api=self.mock_api, plugin_directory=str(Path.cwd()))
         await self.plugin.init(self.ctx, params)
 
-    def _make_selection_query(self, selection: Selection, trigger_keyword: str = "ld") -> Query:
+    def _make_selection_query(self, selection: Selection, trigger_keyword: str = "") -> Query:
         return Query(
             id="q_sel",
             type=QueryType.SELECTION,
@@ -1489,9 +1489,8 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             }],
         }).encode("utf-8")
         mock_http_response.__enter__.return_value = mock_http_response
-        query = self._make_selection_query(
-            Selection(type=SelectionType.TEXT, text="Wox guide"), trigger_keyword="bookmarks"
-        )
+        self.mock_api.settings["TriggerKeywords"] = '["bookmarks"]'
+        query = self._make_selection_query(Selection(type=SelectionType.TEXT, text="Wox guide"))
 
         with patch("urllib.request.urlopen", return_value=mock_http_response):
             response = await self.plugin.query(self.ctx, query)
@@ -1533,6 +1532,38 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             mock_browser_open.assert_called_once_with("https://example.com/wox")
             await bookmark.actions[1].action(self.ctx, ActionContext())
             self.assertEqual(self.mock_api.copied_params[0].text, "https://example.com/wox")
+
+    async def test_selection_query_expansion_reads_current_configured_keyword(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        for match_count in (0, 2):
+            with self.subTest(match_count=match_count):
+                self.mock_api.changed_queries.clear()
+                self.mock_api.settings["TriggerKeywords"] = "[]"
+                mock_http_response = MagicMock()
+                mock_http_response.read.return_value = json.dumps({
+                    "count": match_count,
+                    "results": [
+                        {"id": index, "url": f"https://example.com/{index}", "title": "Wox guide"}
+                        for index in range(match_count)
+                    ],
+                }).encode("utf-8")
+                mock_http_response.__enter__.return_value = mock_http_response
+                query = self._make_selection_query(Selection(type=SelectionType.TEXT, text="Wox guide"))
+
+                with patch("urllib.request.urlopen", return_value=mock_http_response):
+                    response = await self.plugin.query(self.ctx, query)
+                self.assertEqual(len(response.results), 1)
+                # Read settings at action time, including changes since the query ran.
+                self.mock_api.settings["TriggerKeywords"] = '["*", "bookmarks", "bm"]'
+                action = response.results[0].actions[0]
+                self.assertTrue(action.is_default)
+                self.assertTrue(action.prevent_hide_after_action)
+                await action.action(self.ctx, ActionContext())
+                self.assertEqual(len(self.mock_api.changed_queries), 1)
+                self.assertEqual(self.mock_api.changed_queries[0].query_type, QueryType.INPUT)
+                self.assertEqual(self.mock_api.changed_queries[0].query_text, "bookmarks Wox guide")
 
     async def test_selection_query_unprefixed_url(self):
         from unittest.mock import MagicMock, patch

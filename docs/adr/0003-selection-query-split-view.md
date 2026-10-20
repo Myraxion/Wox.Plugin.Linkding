@@ -1,6 +1,6 @@
 # Consolidate Selection Query Matches into Single Aggregation Entry with Split Preview
 
-We decided to present matched bookmarks during Wox Selection Query as a single consolidated aggregation entry with a 0.4:0.6 split preview panel, rather than flooding the multi-plugin selection list with individual bookmark items. Pressing Enter on the aggregation entry expands the query into `ld <keyword>` for interactive bookmark selection in Wox. The action panel (`Ctrl+J`) provides Linkding web search as a secondary action.
+We decided to present matched bookmarks during Wox Selection Query as a single consolidated aggregation entry with a 0.4:0.6 split preview panel, rather than flooding the multi-plugin selection list with individual bookmark items. Pressing Enter on the aggregation entry expands the query into `<trigger> <keyword>` for interactive bookmark selection in Wox. The action panel (`Ctrl+J`) provides Linkding web search as a secondary action.
 
 ## Context & Problem Statement
 
@@ -16,7 +16,7 @@ Furthermore, Wox's preview panel (`WoxPreview`) is a read-only presentation view
 2. **Single aggregation entry with split preview (`WoxPreviewType.LIST`) & query expansion**:
    - Left list contains 1 entry (`Linkding: X bookmarks found`).
    - Right preview panel (ratio 0.6) renders structured items with titles, URLs, and tag badges (`tails`).
-   - Enter expands the query (`api.change_query("ld <keyword>")`) so users can select and open a bookmark in Wox.
+   - Enter expands the query (`api.change_query("<trigger> <keyword>")`) so users can select and open a bookmark in Wox.
    - `Ctrl+J` action panel retains Linkding web search as a secondary action.
    - *Pros*: Clean integration with global selection UI, instant visual feedback of matches, and a discoverable keyboard path to bookmark selection.
    - *Cons*: Opening a specific bookmark requires entering the expanded query first.
@@ -33,12 +33,14 @@ This interaction applies to keyword searches invoked through Selection Query. Se
 
 | Matched bookmarks | Selection entry | Default Enter action |
 | --- | --- | --- |
-| Multiple | One aggregation entry with a read-only bookmark preview | Expand into `ld <keyword>` for bookmark selection |
+| Multiple | One aggregation entry with a read-only bookmark preview | Expand into `<trigger> <keyword>` for bookmark selection |
 | One | The same aggregation entry and preview | Expand first; do not open the bookmark directly |
-| None | One entry showing no matches | Expand into `ld <keyword>` so the user can edit the search terms |
+| None | One entry showing no matches | Expand into `<trigger> <keyword>` so the user can edit the search terms |
 
 Every entry above has exactly two actions: expand the bookmark query (default) and search in the Linkding web interface (secondary). Remove actions that open or copy the first match from the aggregation entry. Individual bookmark actions remain available on the expanded results.
 
 For matched bookmarks, the subtitle should communicate “Press Enter to select a bookmark”; for no matches, it should communicate “No bookmarks found · Press Enter to edit search terms”. Provide both English and Chinese translations.
 
 Query expansion must keep Wox visible (`prevent_hide_after_action=True`) so the user can immediately navigate or edit the expanded query.
+
+The trigger must honor the user's Wox configuration. Use the query's trigger when present. Unscoped selection queries carry no trigger, so expansion reads the `TriggerKeywords` setting at action time and chooses the first non-global keyword. Use the metadata default `ld` only when no custom trigger is configured.

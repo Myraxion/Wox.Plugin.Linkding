@@ -29,7 +29,7 @@ A read-only side panel rendered beside the launcher results (via result preview 
 _Avoid_: Detail window, right column, tooltip
 
 **Query Expansion**:
-The interaction of pressing Enter on an aggregation entry to populate the launcher search bar with `ld <keyword>` and immediately execute it as an interactive bookmark query.
+The interaction of pressing Enter on an aggregation entry to populate the launcher search bar with the configured trigger keyword and selected search text, and immediately execute it as an interactive bookmark query.
 _Avoid_: Drill-down, sub-search, page jump
 
 **Result Identity**:
