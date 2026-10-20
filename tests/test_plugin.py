@@ -1492,7 +1492,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
         self.mock_api.settings["TriggerKeywords"] = '["bookmarks"]'
         query = self._make_selection_query(Selection(type=SelectionType.TEXT, text="Wox guide"))
 
-        with patch("urllib.request.urlopen", return_value=mock_http_response):
+        with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
             response = await self.plugin.query(self.ctx, query)
             self.assertEqual(len(response.results), 1)
             entry = response.results[0]
@@ -1521,6 +1521,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 search="Wox guide",
             )
             expanded_response = await self.plugin.query(self.ctx, expanded_query)
+            self.assertEqual(mock_urlopen.call_count, 1, "Expansion must reuse the selection response")
             self.assertEqual(len(expanded_response.results), 1)
             self.assertIsNone(expanded_response.layout.result_preview_width_ratio)
             bookmark = expanded_response.results[0]
@@ -1564,6 +1565,55 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(self.mock_api.changed_queries), 1)
                 self.assertEqual(self.mock_api.changed_queries[0].query_type, QueryType.INPUT)
                 self.assertEqual(self.mock_api.changed_queries[0].query_text, "bookmarks Wox guide")
+
+    async def test_selection_query_expansion_reuses_empty_and_multiple_matches(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        for match_count in (0, 2):
+            with self.subTest(match_count=match_count):
+                mock_http_response = MagicMock()
+                mock_http_response.read.return_value = json.dumps({
+                    "count": match_count,
+                    "results": [
+                        {"id": index, "url": f"https://example.com/{index}", "title": "Wox guide"}
+                        for index in range(match_count)
+                    ],
+                }).encode("utf-8")
+                mock_http_response.__enter__.return_value = mock_http_response
+                selection_query = self._make_selection_query(
+                    Selection(type=SelectionType.TEXT, text=" Wox guide ")
+                )
+                with patch("urllib.request.urlopen", return_value=mock_http_response) as mock_urlopen:
+                    response = await self.plugin.query(self.ctx, selection_query)
+                    await response.results[0].actions[0].action(self.ctx, ActionContext())
+                    changed_query = self.mock_api.changed_queries[-1]
+                    expanded_query = Query(
+                        id="q_expanded",
+                        type=changed_query.query_type,
+                        raw_query=changed_query.query_text,
+                        selection=None,
+                        env=QueryEnv(),
+                        trigger_keyword="ld",
+                        command="",
+                        search="Wox guide",
+                    )
+                    expanded = await self.plugin.query(self.ctx, expanded_query)
+                    expected_ids = ["bookmark:0", "bookmark:1"] if match_count else ["bookmark:empty"]
+                    self.assertEqual([result.id for result in expanded.results], expected_ids)
+                    self.assertEqual(mock_urlopen.call_count, 1)
+
+                    expanded_query.search = "different keyword"
+                    expanded_query.raw_query = "ld different keyword"
+                    await self.plugin.query(self.ctx, expanded_query)
+                    self.assertEqual(mock_urlopen.call_count, 2)
+
+                    # Changing credentials invalidates the response seeded by selection.
+                    await self.mock_api.setting_changed_callbacks[0](self.ctx, "api_token", "new_token")
+                    expanded_query.search = "Wox guide"
+                    expanded_query.raw_query = changed_query.query_text
+                    await self.plugin.query(self.ctx, expanded_query)
+                    self.assertEqual(mock_urlopen.call_count, 3)
 
     async def test_selection_query_unprefixed_url(self):
         from unittest.mock import MagicMock, patch

@@ -602,6 +602,8 @@ class LinkdingPlugin(Plugin):
 
         try:
             resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+            # Query expansion uses the same response through the regular search cache.
+            self._bookmark_cache[search_text] = (time.time(), resp_data)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 return QueryResponse(

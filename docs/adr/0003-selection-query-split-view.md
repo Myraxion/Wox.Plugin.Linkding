@@ -43,4 +43,6 @@ For matched bookmarks, the subtitle should communicate “Press Enter to select 
 
 Query expansion must keep Wox visible (`prevent_hide_after_action=True`) so the user can immediately navigate or edit the expanded query.
 
+Successful selection searches populate the existing 30-second bookmark response cache, including empty responses. Expanding the same search reuses that response while it is fresh instead of issuing another HTTP request. Changed search terms, expired entries, and existing settings or bookmark-save invalidation rules continue to govern subsequent requests.
+
 The trigger must honor the user's Wox configuration. Use the query's trigger when present. Unscoped selection queries carry no trigger, so expansion reads the `TriggerKeywords` setting at action time and chooses the first non-global keyword. Use the metadata default `ld` only when no custom trigger is configured.
