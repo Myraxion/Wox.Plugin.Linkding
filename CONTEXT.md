@@ -43,3 +43,7 @@ _Avoid_: Status bar, bottom tooltip, counter badge
 **Co-occurring Tag**:
 A tag associated with one or more bookmarks in the currently filtered query subset, ensuring subsequent tag selections never yield zero results.
 _Avoid_: Related tag, sub-tag, candidate tag, child tag
+
+**Query Debounce Interval**:
+The host-level delay in milliseconds after the user stops typing before the launcher invokes the plugin query, balancing keystroke responsiveness against redundant network requests.
+_Avoid_: Delay, debounce time, search pause, typing lag

@@ -124,7 +124,7 @@ class TestPluginMetadata(unittest.TestCase):
         features = meta.get("Features", [])
         debounce_features = [f for f in features if f.get("Name") == "debounce"]
         self.assertEqual(len(debounce_features), 1, "Debounce feature must be declared")
-        self.assertEqual(debounce_features[0].get("Params", {}).get("IntervalMs"), 300)
+        self.assertEqual(debounce_features[0].get("Params", {}).get("IntervalMs"), 200)
 
         query_selection_features = [f for f in features if f.get("Name") == "querySelection"]
         self.assertEqual(len(query_selection_features), 1, "querySelection feature must be declared")

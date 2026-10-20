@@ -16,7 +16,7 @@
 #     {
 #       "Name": "debounce",
 #       "Params": {
-#         "IntervalMs": 300
+#         "IntervalMs": 200
 #       }
 #     }
 #   ],
