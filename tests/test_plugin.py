@@ -1144,6 +1144,49 @@ class TestBookmarkCreationAndDuplicateCheck(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.mock_api.notifications), 1)
             self.assertIn("https://newsite.com/docs", self.mock_api.notifications[0])
 
+    async def test_saving_bookmark_refreshes_bookmarks_and_tags(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        saved = False
+
+        def urlopen(request, **kwargs):
+            nonlocal saved
+            bookmark = {
+                "id": 2 if saved else 1,
+                "url": "https://example.com",
+                "title": "New" if saved else "Old",
+                "tag_names": ["github", "new" if saved else "old"],
+            }
+            if request.get_method() == "POST":
+                saved = True
+                data = {"id": 2}
+            elif "/check/" in request.full_url:
+                data = {"bookmark": None}
+            elif "/api/tags/" in request.full_url:
+                data = {"results": [{"name": "new" if saved else "old"}]}
+            else:
+                data = {"count": 1, "results": [bookmark]}
+            response = MagicMock()
+            response.read.return_value = json.dumps(data).encode("utf-8")
+            response.__enter__.return_value = response
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            await self.plugin.query(self.ctx, self._make_query("#"))
+            await self.plugin.query(self.ctx, self._make_query("example"))
+            await self.plugin.query(self.ctx, self._make_query("#github #"))
+
+            prompt = await self.plugin.query(self.ctx, self._make_query("https://example.com #new"))
+            await prompt.results[0].actions[0].action(self.ctx, ActionContext())
+
+            tags = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual([result.title for result in tags.results], ["#new"])
+            bookmarks = await self.plugin.query(self.ctx, self._make_query("example"))
+            self.assertEqual([result.title for result in bookmarks.results], ["New"])
+            cooccurring = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            self.assertEqual([result.title for result in cooccurring.results], ["#new"])
+
     async def test_submit_new_bookmark_action_failure_notifies(self):
         from unittest.mock import patch
         from wox_plugin import ActionContext
@@ -1360,13 +1403,46 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
             await self.plugin.query(self.ctx, self._make_query("#"))
             self.assertEqual(mock_urlopen.call_count, 1)
 
-            # Simulating setting change
             callback = self.mock_api.setting_changed_callbacks[0]
-            await callback(self.ctx, "api_token", "new_token")
+            for key, value, expected_calls in (
+                ("api_token", "new_token", 2),
+                ("linkding_url", "https://other.example.com", 3),
+                ("max_results", "20", 3),
+            ):
+                with self.subTest(key=key):
+                    await callback(self.ctx, key, value)
+                    response = await self.plugin.query(self.ctx, self._make_query("#"))
+                    self.assertEqual([result.title for result in response.results], ["#tag1"])
+                    self.assertEqual(mock_urlopen.call_count, expected_calls)
 
-            # Next tag query should fetch again because cache was invalidated
-            await self.plugin.query(self.ctx, self._make_query("#"))
-            self.assertEqual(mock_urlopen.call_count, 2)
+    async def test_cooccurring_tags_cache_expires_after_bookmark_search(self):
+        from unittest.mock import MagicMock, patch
+
+        responses = []
+        for tag in ("python", "python", "refreshed"):
+            response = MagicMock()
+            response.read.return_value = json.dumps({
+                "count": 1,
+                "results": [{"id": 1, "url": "https://example.com", "tag_names": ["github", tag]}],
+            }).encode("utf-8")
+            response.__enter__.return_value = response
+            responses.append(response)
+
+        with patch("time.time", return_value=1000.0) as clock, \
+             patch("urllib.request.urlopen", side_effect=responses) as http:
+            await self.plugin.query(self.ctx, self._make_query("#github "))
+            initial = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            self.assertEqual([result.title for result in initial.results], ["#python"])
+
+            clock.return_value = 1029.0
+            cached = await self.plugin.query(self.ctx, self._make_query("#github #py"))
+            self.assertEqual([result.title for result in cached.results], ["#python"])
+            self.assertEqual(http.call_count, 2)
+
+            clock.return_value = 1031.0
+            refreshed = await self.plugin.query(self.ctx, self._make_query("#github #"))
+            self.assertEqual([result.title for result in refreshed.results], ["#refreshed"])
+            self.assertEqual(http.call_count, 3)
 
     async def test_tag_selection_invokes_change_query(self):
         from unittest.mock import MagicMock, patch
@@ -1650,27 +1726,28 @@ class TestTagBrowsingAndSearch(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.results[0].title, "#python")
             self.assertEqual(response.results[1].title, "#pytest")
 
-    async def test_cooccurring_tags_prewarm_cache(self):
+    async def test_cooccurring_tags_include_bookmarks_beyond_display_limit(self):
         from unittest.mock import MagicMock, patch
 
-        bookmarks_data = {
-            "count": 1,
-            "results": [
-                {"id": 1, "url": "https://a.com", "title": "A", "tag_names": ["github", "python"]},
-            ],
-        }
-        mock_http_resp = MagicMock()
-        mock_http_resp.read.return_value = json.dumps(bookmarks_data).encode("utf-8")
-        mock_http_resp.__enter__.return_value = mock_http_resp
+        bookmarks = [
+            {"id": i, "url": f"https://example.com/{i}", "tag_names": ["github", "python"]}
+            for i in range(10)
+        ]
+        bookmarks.append({"id": 10, "url": "https://example.com/10", "tag_names": ["github", "rare"]})
+        responses = []
+        for items in (bookmarks[:10], bookmarks):
+            response = MagicMock()
+            response.read.return_value = json.dumps({"count": 11, "results": items}).encode("utf-8")
+            response.__enter__.return_value = response
+            responses.append(response)
 
-        with patch("urllib.request.urlopen", return_value=mock_http_resp) as mock_urlopen:
+        with patch("urllib.request.urlopen", side_effect=responses) as mock_urlopen:
             await self.plugin.query(self.ctx, self._make_query("#github "))
-            self.assertEqual(mock_urlopen.call_count, 1)
 
             res = await self.plugin.query(self.ctx, self._make_query("#github #"))
-            self.assertEqual(len(res.results), 1)
-            self.assertEqual(res.results[0].title, "#python")
-            self.assertEqual(mock_urlopen.call_count, 1)
+            self.assertEqual([result.title for result in res.results], ["#python", "#rare"])
+            self.assertEqual([result.tails[0].text for result in res.results], ["10", "1"])
+            self.assertIn("limit=100", mock_urlopen.call_args[0][0].full_url)
 
     async def test_cooccurring_tags_empty_when_no_bookmarks(self):
         from unittest.mock import MagicMock, patch

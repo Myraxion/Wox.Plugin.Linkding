@@ -287,8 +287,6 @@ class LinkdingPlugin(Plugin):
         self.COOCCURRING_TAG_CACHE_TTL: float = 30.0
         self._bookmark_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         self.BOOKMARK_CACHE_TTL: float = 30.0
-        self._last_bookmark_query: str = ""
-        self._last_bookmarks: List[Dict[str, Any]] = []
         self._query_generation = 0
         self._selection_search: Optional[asyncio.Task[Optional[Result]]] = None
         self._favicon_cache: Dict[str, tuple[float, Optional[WoxImage]]] = {}
@@ -354,10 +352,18 @@ class LinkdingPlugin(Plugin):
         if self.api and hasattr(self.api, "clear_toolbar_msg"):
             await self.api.clear_toolbar_msg(ctx, self.TOOLBAR_MSG_ID)
 
+    def _invalidate_data_caches(self, *, include_tags: bool = True) -> None:
+        self._bookmark_cache.clear()
+        self._cooccurring_tag_cache.clear()
+        if include_tags:
+            self._tag_cache = None
+            self._tag_cache_time = 0.0
+
     async def _on_setting_changed(self, ctx: Context, key: str, value: str) -> None:
         if key in ("linkding_url", "api_token", "max_results"):
             self._query_generation += 1
             self._cancel_selection_search()
+            self._invalidate_data_caches(include_tags=key != "max_results")
         if key in ("linkding_url", "api_token"):
             self._favicon_cache.clear()
             for task in self._favicon_downloads.values():
@@ -365,24 +371,10 @@ class LinkdingPlugin(Plugin):
             self._favicon_downloads.clear()
         if key == "linkding_url":
             self.linkding_url = value.strip().rstrip("/") if value else ""
-            self._tag_cache = None
-            self._tag_cache_time = 0.0
-            self._cooccurring_tag_cache.clear()
-            self._bookmark_cache.clear()
-            self._last_bookmark_query = ""
-            self._last_bookmarks = []
         elif key == "api_token":
             self.api_token = value.strip() if value else ""
-            self._tag_cache = None
-            self._tag_cache_time = 0.0
-            self._cooccurring_tag_cache.clear()
-            self._bookmark_cache.clear()
-            self._last_bookmark_query = ""
-            self._last_bookmarks = []
         elif key == "max_results":
             self.max_results = int(value) if value and value.strip().isdigit() else 10
-            self._cooccurring_tag_cache.clear()
-            self._bookmark_cache.clear()
 
     async def query(self, ctx: Context, query: Query) -> QueryResponse:
         self._query_generation += 1
@@ -667,8 +659,6 @@ class LinkdingPlugin(Plugin):
                 )
 
         raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
-        self._last_bookmark_query = search_text
-        self._last_bookmarks = raw_bookmarks
         total_count = resp_data.get("count", len(raw_bookmarks))
         bm_template = (
             await self.api.get_translation(ctx, "toolbar_bookmarks_found")
@@ -1302,10 +1292,7 @@ class LinkdingPlugin(Plugin):
             )
             try:
                 await asyncio.to_thread(self._fetch_bookmarks_http, req)
-                self._bookmark_cache.clear()
-                self._cooccurring_tag_cache.clear()
-                self._last_bookmark_query = ""
-                self._last_bookmarks = []
+                self._invalidate_data_caches()
                 if self.api:
                     msg = await self.api.get_translation(ctx, "notify_bookmark_created")
                     await self.api.notify(ctx, f"{msg}: {target_url}")
@@ -1340,14 +1327,11 @@ class LinkdingPlugin(Plugin):
         if cached is not None and (now - cached[0]) < self.COOCCURRING_TAG_CACHE_TTL:
             return cached[1]
 
-        if self._last_bookmark_query == prefix_query and self._last_bookmarks:
-            bookmarks = self._last_bookmarks
-        else:
-            encoded_q = urllib.parse.quote(prefix_query)
-            req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit=100"
-            req = self._create_request(req_url)
-            resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
-            bookmarks = resp_data.get("results", [])
+        encoded_q = urllib.parse.quote(prefix_query)
+        req_url = f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit=100"
+        req = self._create_request(req_url)
+        resp_data = await asyncio.to_thread(self._fetch_bookmarks_http, req)
+        bookmarks = resp_data.get("results", [])
 
         tag_counts: Dict[str, int] = {}
         for bm in bookmarks:
