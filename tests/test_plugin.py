@@ -40,7 +40,8 @@ class MockPublicAPI:
             "no_matching_tags": "No matching tags",
             "tag_action_select": "Filter bookmarks by this tag",
             "selection_bookmarks_found": "Linkding: {count} bookmarks found",
-            "selection_press_enter_to_search_web": "Press Enter to search in Linkding web · Ctrl+J for more actions",
+            "selection_press_enter_to_expand": "Press Enter to select a bookmark",
+            "selection_press_enter_to_edit": "No bookmarks found · Press Enter to edit search terms",
             "selection_action_expand": "Expand Bookmark List",
             "toolbar_tags_found": "{count} tags found",
             "toolbar_bookmarks_found": "{count} bookmarks found",
@@ -190,7 +191,8 @@ class TestPluginMetadata(unittest.TestCase):
             self.assertIn("no_matching_tags", i18n[lang])
             self.assertIn("tag_action_select", i18n[lang])
             self.assertIn("selection_bookmarks_found", i18n[lang])
-            self.assertIn("selection_press_enter_to_search_web", i18n[lang])
+            self.assertIn("selection_press_enter_to_expand", i18n[lang])
+            self.assertIn("selection_press_enter_to_edit", i18n[lang])
             self.assertIn("selection_action_expand", i18n[lang])
             self.assertIn("toolbar_tags_found", i18n[lang])
             self.assertIn("toolbar_bookmarks_found", i18n[lang])
@@ -1385,7 +1387,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(response.results), 1)
             res = response.results[0]
             self.assertEqual(res.title, "Linkding: 2 bookmarks found")
-            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_search_web")
+            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_expand")
 
             # 2. Split layout ratio 0.6
             self.assertIsNotNone(response.layout)
@@ -1402,38 +1404,34 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertIn("#launcher", first_item_tails)
             self.assertIn("#python", first_item_tails)
 
-            # 4. Actions: Enter (default) opens Linkding web search
-            self.assertEqual(len(res.actions), 4)
-            web_search_action = res.actions[0]
-            self.assertEqual(web_search_action.name, "i18n:action_open_in_linkding")
-            self.assertTrue(web_search_action.is_default)
-
-            # 5. Auxiliary actions: expand query, open first, copy url
-            expand_action = res.actions[1]
+            # 4. Enter expands the query and keeps Wox visible
+            self.assertEqual(len(res.actions), 2)
+            expand_action = res.actions[0]
             self.assertEqual(expand_action.name, "i18n:selection_action_expand")
-            self.assertFalse(expand_action.is_default)
+            self.assertTrue(expand_action.is_default)
+            self.assertTrue(expand_action.prevent_hide_after_action)
             await expand_action.action(self.ctx, ActionContext())
             self.assertEqual(len(self.mock_api.changed_queries), 1)
             cq = self.mock_api.changed_queries[0]
             self.assertEqual(cq.query_type, QueryType.INPUT)
             self.assertEqual(cq.query_text, "ld Wox launcher")
 
-            open_first_action = res.actions[2]
-            self.assertEqual(open_first_action.name, "i18n:action_open_url")
-            self.assertFalse(open_first_action.is_default)
-
-            copy_url_action = res.actions[3]
-            self.assertEqual(copy_url_action.name, "i18n:action_copy_url")
-            self.assertFalse(copy_url_action.is_default)
-            await copy_url_action.action(self.ctx, ActionContext())
-            self.assertEqual(len(self.mock_api.copied_params), 1)
-            self.assertEqual(self.mock_api.copied_params[0].text, "https://woxlauncher.com")
+            # 5. Web search is the only secondary action
+            web_search_action = res.actions[1]
+            self.assertEqual(web_search_action.name, "i18n:action_open_in_linkding")
+            self.assertFalse(web_search_action.is_default)
+            with patch("webbrowser.open") as mock_browser_open:
+                await web_search_action.action(self.ctx, ActionContext())
+            mock_browser_open.assert_called_once_with(
+                "https://linkding.example.com/bookmarks?q=Wox%20launcher"
+            )
 
             req = mock_urlopen.call_args[0][0]
             self.assertIn("/api/bookmarks/?q=Wox%20launcher&limit=10", req.full_url)
 
     async def test_selection_query_no_bookmarks_found_guidance(self):
         from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
 
         mock_response_data = {"count": 0, "results": []}
         mock_http_response = MagicMock()
@@ -1449,17 +1447,92 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(response.results), 1)
             res = response.results[0]
             self.assertEqual(res.title, "i18n:no_bookmarks_found")
-            self.assertEqual(res.sub_title, "i18n:no_bookmarks_found_sub")
+            self.assertEqual(res.sub_title, "i18n:selection_press_enter_to_edit")
 
             # Split layout ratio 0.6 and List preview
             self.assertIsNotNone(response.layout)
             self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
             self.assertEqual(res.preview.preview_type, WoxPreviewType.LIST)
 
-            # Default action opens Linkding web search
-            self.assertEqual(len(res.actions), 1)
-            self.assertEqual(res.actions[0].name, "i18n:action_open_in_linkding")
+            preview_items = json.loads(res.preview.preview_data)["items"]
+            self.assertEqual(preview_items[0]["subtitle"], "i18n:selection_press_enter_to_edit")
+
+            # Enter opens an editable query even without matches
+            self.assertEqual(len(res.actions), 2)
+            self.assertEqual(res.actions[0].name, "i18n:selection_action_expand")
             self.assertTrue(res.actions[0].is_default)
+            self.assertTrue(res.actions[0].prevent_hide_after_action)
+            await res.actions[0].action(self.ctx, ActionContext())
+            self.assertEqual(len(self.mock_api.changed_queries), 1)
+            self.assertEqual(self.mock_api.changed_queries[0].query_type, QueryType.INPUT)
+            self.assertEqual(self.mock_api.changed_queries[0].query_text, "ld NonExistentTopic")
+            self.assertEqual(res.actions[1].name, "i18n:action_open_in_linkding")
+            self.assertFalse(res.actions[1].is_default)
+            with patch("webbrowser.open") as mock_browser_open:
+                await res.actions[1].action(self.ctx, ActionContext())
+            mock_browser_open.assert_called_once_with(
+                "https://linkding.example.com/bookmarks?q=NonExistentTopic"
+            )
+
+    async def test_selection_query_single_match_expands_before_bookmark_actions(self):
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        mock_http_response = MagicMock()
+        mock_http_response.read.return_value = json.dumps({
+            "count": 1,
+            "results": [{
+                "id": 7,
+                "url": "https://example.com/wox",
+                "title": "Wox guide",
+                "tag_names": ["guide"],
+            }],
+        }).encode("utf-8")
+        mock_http_response.__enter__.return_value = mock_http_response
+        query = self._make_selection_query(
+            Selection(type=SelectionType.TEXT, text="Wox guide"), trigger_keyword="bookmarks"
+        )
+
+        with patch("urllib.request.urlopen", return_value=mock_http_response):
+            response = await self.plugin.query(self.ctx, query)
+            self.assertEqual(len(response.results), 1)
+            entry = response.results[0]
+            self.assertEqual(entry.id, "selection:bookmarks")
+            self.assertEqual(entry.sub_title, "i18n:selection_press_enter_to_expand")
+            self.assertEqual([action.name for action in entry.actions], [
+                "i18n:selection_action_expand", "i18n:action_open_in_linkding"
+            ])
+            self.assertTrue(entry.actions[0].is_default)
+            self.assertTrue(entry.actions[0].prevent_hide_after_action)
+            with patch("webbrowser.open") as mock_browser_open:
+                await entry.actions[0].action(self.ctx, ActionContext())
+            mock_browser_open.assert_not_called()
+            changed_query = self.mock_api.changed_queries[0]
+            self.assertEqual(changed_query.query_type, QueryType.INPUT)
+            self.assertEqual(changed_query.query_text, "bookmarks Wox guide")
+
+            expanded_query = Query(
+                id="q_expanded",
+                type=changed_query.query_type,
+                raw_query=changed_query.query_text,
+                selection=None,
+                env=QueryEnv(),
+                trigger_keyword="bookmarks",
+                command="",
+                search="Wox guide",
+            )
+            expanded_response = await self.plugin.query(self.ctx, expanded_query)
+            self.assertEqual(len(expanded_response.results), 1)
+            self.assertIsNone(expanded_response.layout.result_preview_width_ratio)
+            bookmark = expanded_response.results[0]
+            self.assertEqual(bookmark.id, "bookmark:7")
+            self.assertEqual(bookmark.actions[0].name, "i18n:action_open_url")
+            self.assertTrue(bookmark.actions[0].is_default)
+            with patch("webbrowser.open") as mock_browser_open:
+                await bookmark.actions[0].action(self.ctx, ActionContext())
+            mock_browser_open.assert_called_once_with("https://example.com/wox")
+            await bookmark.actions[1].action(self.ctx, ActionContext())
+            self.assertEqual(self.mock_api.copied_params[0].text, "https://example.com/wox")
 
     async def test_selection_query_unprefixed_url(self):
         from unittest.mock import MagicMock, patch

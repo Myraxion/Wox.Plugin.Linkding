@@ -53,7 +53,8 @@
 #       "no_matching_tags": "No matching tags",
 #       "tag_action_select": "Filter bookmarks by this tag",
 #       "selection_bookmarks_found": "Linkding: {count} bookmarks found",
-#       "selection_press_enter_to_search_web": "Press Enter to search in Linkding web · Ctrl+J for more actions",
+#       "selection_press_enter_to_expand": "Press Enter to select a bookmark",
+#       "selection_press_enter_to_edit": "No bookmarks found · Press Enter to edit search terms",
 #       "selection_action_expand": "Expand Bookmark List",
 #       "toolbar_tags_found": "{count} tags found",
 #       "toolbar_bookmarks_found": "{count} bookmarks found"
@@ -90,7 +91,8 @@
 #       "no_matching_tags": "未找到匹配的标签",
 #       "tag_action_select": "按回车筛选此标签下的书签",
 #       "selection_bookmarks_found": "Linkding: 找到 {count} 个相关书签",
-#       "selection_press_enter_to_search_web": "按回车在 Linkding 网页中搜索 · Ctrl+J 更多操作",
+#       "selection_press_enter_to_expand": "按回车选择书签",
+#       "selection_press_enter_to_edit": "未找到书签 · 按回车修改搜索词",
 #       "selection_action_expand": "展开书签列表",
 #       "toolbar_tags_found": "共 {count} 个标签",
 #       "toolbar_bookmarks_found": "共 {count} 个书签"
@@ -244,6 +246,21 @@ DOMAIN_REGEX = re.compile(
 LOCALHOST_REGEX = re.compile(
     r"^localhost(?::\d+)?(?:[/?#].*)?$",
     re.IGNORECASE,
+)
+
+
+ACTION_SEARCH_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
+    'fill="none" stroke="var(--wox-theme-icon-color)" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>'
+)
+ACTION_OPEN_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
+    'fill="none" stroke="var(--wox-theme-icon-color)" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M14 5h5v5M19 5l-9 9"/>'
+    '<path d="M13 7H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-7"/></svg>'
 )
 
 
@@ -662,12 +679,27 @@ class LinkdingPlugin(Plugin):
         raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
         web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
         trigger_keyword = query.trigger_keyword or "ld"
+        actions = [
+            ResultAction(
+                name="i18n:selection_action_expand",
+                icon=WoxImage.new_svg(ACTION_SEARCH_SVG),
+                is_default=True,
+                prevent_hide_after_action=True,
+                action=self._create_change_query_action(trigger_keyword, search_text),
+            ),
+            ResultAction(
+                name="i18n:action_open_in_linkding",
+                icon=WoxImage.new_svg(ACTION_OPEN_SVG),
+                is_default=False,
+                action=self._create_open_url_action(web_search_url),
+            ),
+        ]
 
         if not raw_bookmarks:
             empty_item = WoxPreviewListItem(
                 icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                 title="i18n:no_bookmarks_found",
-                subtitle="i18n:no_bookmarks_found_sub",
+                subtitle="i18n:selection_press_enter_to_edit",
             )
             preview = WoxPreview(
                 preview_type=WoxPreviewType.LIST,
@@ -678,17 +710,10 @@ class LinkdingPlugin(Plugin):
                     Result(
                         id="bookmark:empty",
                         title="i18n:no_bookmarks_found",
-                        sub_title="i18n:no_bookmarks_found_sub",
+                        sub_title="i18n:selection_press_enter_to_edit",
                         icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                         preview=preview,
-                        actions=[
-                            ResultAction(
-                                name="i18n:action_open_in_linkding",
-                                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                                is_default=True,
-                                action=self._create_open_url_action(web_search_url),
-                            )
-                        ],
+                        actions=actions,
                     )
                 ],
                 layout=layout,
@@ -727,40 +752,12 @@ class LinkdingPlugin(Plugin):
         except Exception:
             title = f"Linkding: {count} bookmarks found"
 
-        first_bm_url = raw_bookmarks[0].get("url", "")
-        actions = [
-            ResultAction(
-                name="i18n:action_open_in_linkding",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=True,
-                action=self._create_open_url_action(web_search_url),
-            ),
-            ResultAction(
-                name="i18n:selection_action_expand",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=False,
-                action=self._create_change_query_action(trigger_keyword, search_text),
-            ),
-            ResultAction(
-                name="i18n:action_open_url",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=False,
-                action=self._create_open_url_action(first_bm_url),
-            ),
-            ResultAction(
-                name="i18n:action_copy_url",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=False,
-                action=self._create_copy_url_action(first_bm_url),
-            ),
-        ]
-
         return QueryResponse(
             results=[
                 Result(
                     id="selection:bookmarks",
                     title=title,
-                    sub_title="i18n:selection_press_enter_to_search_web",
+                    sub_title="i18n:selection_press_enter_to_expand",
                     icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     preview=preview,
                     actions=actions,

@@ -21,7 +21,7 @@ A stored artifact associated with a bookmark, such as an archived HTML snapshot 
 _Avoid_: Attachment, snapshot, download, media
 
 **Selection Aggregation Entry**:
-A consolidated single launcher result representing multiple matched bookmarks when invoking Wox via text selection, avoiding visual clutter in multi-plugin selection menus.
+A single launcher entry summarizing bookmark matches for selected text, including an empty result, while preserving space for other plugins in selection menus.
 _Avoid_: Group, folder, category result
 
 **Preview Panel**:
