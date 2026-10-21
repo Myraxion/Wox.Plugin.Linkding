@@ -3096,6 +3096,149 @@ class TestBookmarkSearchCache(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(flat.results[0].title, "Refreshed")
             self.assertEqual(http.call_count, 2)
 
+    async def test_connection_changes_reject_inflight_cache_writes(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+
+        callback = self.mock_api.setting_changed_callbacks[0]
+        for search in ("python", "#"):
+            for key, value in (
+                ("linkding_url", "https://other.example.com"),
+                ("api_token", "new_token"),
+            ):
+                with self.subTest(search=search, key=key):
+                    await callback(self.ctx, "linkding_url", "https://linkding.example.com")
+                    await callback(self.ctx, "api_token", "secret_token")
+                    gate = threading.Event()
+                    started = asyncio.Event()
+                    loop = asyncio.get_running_loop()
+                    requests = []
+
+                    def urlopen(request, **kwargs):
+                        old = not requests
+                        requests.append(request)
+                        if old:
+                            loop.call_soon_threadsafe(started.set)
+                            gate.wait(timeout=5)
+                        name = "old" if old else "new"
+                        data = (
+                            {"results": [{"name": name}]}
+                            if "/api/tags/" in request.full_url else
+                            {"results": [{"id": 1, "url": "https://example.com", "title": name}]}
+                        )
+                        response = MagicMock()
+                        response.__enter__.return_value = response
+                        response.read.return_value = json.dumps(data).encode()
+                        return response
+
+                    with patch("urllib.request.urlopen", side_effect=urlopen):
+                        pending = asyncio.create_task(self.plugin.query(self.ctx, self._make_query(search)))
+                        try:
+                            await asyncio.wait_for(started.wait(), timeout=2)
+                            await callback(self.ctx, key, value)
+                            fresh = await self.plugin.query(self.ctx, self._make_query(search))
+                        finally:
+                            gate.set()
+                            old_response = await asyncio.wait_for(pending, timeout=2)
+                        cached = await self.plugin.query(self.ctx, self._make_query(search))
+
+                    prefix = "#" if search == "#" else ""
+                    self.assertEqual(old_response.results[0].title, prefix + "old")
+                    self.assertEqual(fresh.results[0].title, prefix + "new")
+                    self.assertEqual(cached.results[0].title, prefix + "new")
+                    self.assertEqual(len(requests), 2)
+                    if key == "linkding_url":
+                        self.assertTrue(requests[1].full_url.startswith(value + "/api/"))
+                    else:
+                        self.assertEqual(requests[1].headers["Authorization"], "Token new_token")
+
+    async def test_max_results_change_preserves_inflight_tag_cache(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+
+        gate = threading.Event()
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def urlopen(request, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            gate.wait(timeout=5)
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({"results": [{"name": "python"}]}).encode()
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen) as http:
+            pending = asyncio.create_task(self.plugin.query(self.ctx, self._make_query("#")))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                callback = self.mock_api.setting_changed_callbacks[0]
+                await callback(self.ctx, "max_results", "20")
+            finally:
+                gate.set()
+                response = await asyncio.wait_for(pending, timeout=2)
+            cached = await self.plugin.query(self.ctx, self._make_query("#"))
+            self.assertEqual(response.results[0].title, "#python")
+            self.assertEqual(cached.results[0].title, "#python")
+            self.assertEqual(http.call_count, 1)
+
+    async def test_save_rejects_inflight_bookmark_and_tag_cache_writes(self):
+        import threading
+        from unittest.mock import MagicMock, patch
+        from wox_plugin import ActionContext
+
+        gate = threading.Event()
+        started = {"bookmarks": asyncio.Event(), "tags": asyncio.Event()}
+        loop = asyncio.get_running_loop()
+        saved = False
+        requests = []
+
+        def urlopen(request, **kwargs):
+            nonlocal saved
+            requests.append(request)
+            if request.get_method() == "POST":
+                saved = True
+                data = {"id": 2}
+            elif "/check/" in request.full_url:
+                data = {"bookmark": None}
+            else:
+                old = not saved
+                kind = "tags" if "/api/tags/" in request.full_url else "bookmarks"
+                if old:
+                    loop.call_soon_threadsafe(started[kind].set)
+                    gate.wait(timeout=5)
+                name = "old" if old else "new"
+                data = (
+                    {"results": [{"name": name}]}
+                    if kind == "tags" else
+                    {"results": [{"id": 1, "url": "https://example.com", "title": name}]}
+                )
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps(data).encode()
+            return response
+
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            prompt = await self.plugin.query(self.ctx, self._make_query("https://example.com #new"))
+            pending = [asyncio.create_task(self.plugin.query(self.ctx, self._make_query(search)))
+                       for search in ("python", "#")]
+            try:
+                for event in started.values():
+                    await asyncio.wait_for(event.wait(), timeout=2)
+                await prompt.results[0].actions[0].action(self.ctx, ActionContext())
+                fresh = [await self.plugin.query(self.ctx, self._make_query(search))
+                         for search in ("python", "#")]
+            finally:
+                gate.set()
+                old_responses = await asyncio.wait_for(asyncio.gather(*pending), timeout=2)
+            cached = [await self.plugin.query(self.ctx, self._make_query(search))
+                      for search in ("python", "#")]
+
+        self.assertEqual([response.results[0].title for response in old_responses], ["old", "#old"])
+        self.assertEqual([response.results[0].title for response in fresh], ["new", "#new"])
+        self.assertEqual([response.results[0].title for response in cached], ["new", "#new"])
+        self.assertEqual(len(requests), 6)  # Duplicate check, save, two old reads, two fresh reads.
+
     async def test_search_bookmarks_cache_invalidates_on_setting_changed(self):
         from unittest.mock import MagicMock, patch
 

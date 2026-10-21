@@ -296,8 +296,10 @@ class LinkdingPlugin(Plugin):
         self.max_results: int = 10
         self._tag_cache: Optional[List[str]] = None
         self._tag_cache_time: float = 0.0
+        self._tag_cache_version = 0
         self.TAG_CACHE_TTL: float = 300.0
         self._bookmark_cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]] = {}
+        self._bookmark_cache_version = 0
         self.BOOKMARK_CACHE_TTL: float = 30.0
         self._query_generation = 0
         self._selection_search: Optional[asyncio.Task[Optional[Result]]] = None
@@ -365,8 +367,11 @@ class LinkdingPlugin(Plugin):
             await self.api.clear_toolbar_msg(ctx, self.TOOLBAR_MSG_ID)
 
     def _invalidate_data_caches(self, *, include_tags: bool = True) -> None:
+        # In-flight responses also lose permission to populate these caches.
+        self._bookmark_cache_version += 1
         self._bookmark_cache.clear()
         if include_tags:
+            self._tag_cache_version += 1
             self._tag_cache = None
             self._tag_cache_time = 0.0
 
@@ -780,8 +785,10 @@ class LinkdingPlugin(Plugin):
 
         encoded_q = urllib.parse.quote(search_text)
         req = self._create_request(f"{self.linkding_url}/api/bookmarks/?q={encoded_q}&limit={limit}")
+        version = self._bookmark_cache_version
         resp_data = await asyncio.to_thread(self._fetch_json_http, req)
-        self._bookmark_cache[cache_key] = (time.time(), resp_data)
+        if version == self._bookmark_cache_version:
+            self._bookmark_cache[cache_key] = (time.time(), resp_data)
         return resp_data
 
     def _fetch_json_http(self, req: urllib.request.Request) -> Dict[str, Any]:
@@ -966,11 +973,13 @@ class LinkdingPlugin(Plugin):
 
         req_url = f"{self.linkding_url}/api/tags/"
         req = self._create_request(req_url)
+        version = self._tag_cache_version
         resp_data = await asyncio.to_thread(self._fetch_json_http, req)
         raw_tags = resp_data.get("results", [])
         tags = [t["name"] for t in raw_tags if isinstance(t, dict) and "name" in t]
-        self._tag_cache = tags
-        self._tag_cache_time = now
+        if version == self._tag_cache_version:
+            self._tag_cache = tags
+            self._tag_cache_time = now
         return tags
 
     async def _get_cooccurring_tags(self, ctx: Context, raw_prefix: str) -> Dict[str, int]:
