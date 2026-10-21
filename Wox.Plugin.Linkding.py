@@ -48,6 +48,9 @@
 #       "error_timeout": "Request Timed Out",
 #       "error_timeout_sub": "Connection to Linkding server timed out",
 #       "bookmark_already_exists": "⚠️ Already bookmarked",
+#       "preview_existing_bookmark": "### ⚠️ Already bookmarked\n- **Title**: {title}\n- **URL**: `{url}`\n- **Existing tags**: {tags}",
+#       "preview_save_bookmark": "### 🔖 Save bookmark to Linkding\n- **URL**: `{url}`\n- **Tags**: {tags}\n> Press Enter to save. Linkding will fetch the page title and description in the background.",
+#       "preview_no_tags": "None",
 #       "prompt_save_bookmark": "Press Enter to save bookmark",
 #       "action_save_bookmark": "Save Bookmark",
 #       "notify_bookmark_created": "Bookmark saved successfully",
@@ -93,6 +96,9 @@
 #       "error_timeout": "请求超时",
 #       "error_timeout_sub": "连接 Linkding 服务器超时",
 #       "bookmark_already_exists": "⚠️ 该 URL 已收藏",
+#       "preview_existing_bookmark": "### ⚠️ 该 URL 已收藏\n- **标题**：{title}\n- **网址**：`{url}`\n- **已有标签**：{tags}",
+#       "preview_save_bookmark": "### 🔖 保存书签至 Linkding\n- **目标网址**：`{url}`\n- **标签**：{tags}\n> 按 Enter 立即保存，Linkding 将在后台自动抓取网页标题和描述",
+#       "preview_no_tags": "无",
 #       "prompt_save_bookmark": "按回车添加书签",
 #       "action_save_bookmark": "保存书签",
 #       "notify_bookmark_created": "书签添加成功",
@@ -199,7 +205,7 @@ Wox Linkding Plugin
 Single-file Python SDK plugin integrating Wox launcher with Linkding.
 """
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import asyncio
 import base64
 import http.client
@@ -386,7 +392,7 @@ class LinkdingPlugin(Plugin):
         self._cancel_selection_search()
         generation = self._query_generation
         response = await self._query(ctx, query)
-        self._prepare_favicons(ctx, response, generation)
+        self._prepare_favicons(ctx, response.results, generation)
         return response
 
     def _bookmark_icon(self, bookmark: Dict[str, Any]) -> WoxImage:
@@ -394,12 +400,12 @@ class LinkdingPlugin(Plugin):
         return WoxImage.new_url(url) if url else WoxImage.new_svg(LINKDING_ICON_SVG)
 
     def _prepare_favicons(
-        self, ctx: Context, response: QueryResponse, generation: int,
+        self, ctx: Context, results: List[Result], generation: int,
         ready: Optional[asyncio.Event] = None,
     ) -> None:
         # URL icons are internal markers until replaced with cached data or the
         # Linkding SVG. Never delegate the fallback to Wox's generic placeholder.
-        for result in response.results:
+        for result in results:
             preview_data = (
                 WoxPreviewListData.from_json(json.loads(result.preview.preview_data))
                 if result.preview.preview_type == WoxPreviewType.LIST
@@ -589,12 +595,7 @@ class LinkdingPlugin(Plugin):
 
         raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
         total_count = resp_data.get("count", len(raw_bookmarks))
-        bm_template = (
-            await self.api.get_translation(ctx, "toolbar_bookmarks_found")
-            if self.api
-            else "{count} bookmarks found"
-        )
-        await self._show_status(ctx, bm_template.format(count=total_count))
+        await self._show_status(ctx, await self._translate(ctx, "toolbar_bookmarks_found", count=total_count))
 
         web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
 
@@ -618,54 +619,38 @@ class LinkdingPlugin(Plugin):
                 ]
             )
 
-        page_count = len(raw_bookmarks)
-        results: List[Result] = []
-        for index, item in enumerate(raw_bookmarks):
-            bm_id = item.get("id")
-            bm_url = item.get("url", "")
-            title = item.get("title") or item.get("website_title") or bm_url
-            tags = item.get("tag_names") or []
-            if tags:
-                tags_str = " ".join(f"#{tag}" for tag in tags)
-                sub_title = f"{bm_url} · {tags_str}"
-            else:
-                sub_title = bm_url
+        return QueryResponse(results=[
+            self._bookmark_result(item, web_search_url, float(len(raw_bookmarks) - index))
+            for index, item in enumerate(raw_bookmarks)
+        ])
 
-            actions = [
+    def _bookmark_result(
+        self, bookmark: Dict[str, Any], web_search_url: str, score: float = 0.0,
+    ) -> Result:
+        bookmark_id = bookmark.get("id")
+        url = bookmark.get("url", "")
+        tags = " ".join(f"#{tag}" for tag in bookmark.get("tag_names") or [])
+        return Result(
+            id=f"bookmark:{bookmark_id}" if bookmark_id is not None else f"bookmark:{url}",
+            title=bookmark.get("title") or bookmark.get("website_title") or url,
+            sub_title=f"{url} · {tags}" if tags else url,
+            icon=self._bookmark_icon(bookmark),
+            score=score,
+            actions=[
                 ResultAction(
-                    name="i18n:action_open_url",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    is_default=True,
-                    action=self._create_open_url_action(bm_url),
+                    name="i18n:action_open_url", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    is_default=True, action=self._create_open_url_action(url),
                 ),
                 ResultAction(
-                    name="i18n:action_copy_url",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    is_default=False,
-                    action=self._create_copy_url_action(bm_url),
+                    name="i18n:action_copy_url", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                    action=self._create_copy_url_action(url),
                 ),
                 ResultAction(
-                    name="i18n:action_open_in_linkding",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    is_default=False,
+                    name="i18n:action_open_in_linkding", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
                     action=self._create_open_url_action(web_search_url),
                 ),
-            ]
-
-            result_id = f"bookmark:{bm_id}" if bm_id is not None else f"bookmark:{bm_url}"
-            initial_score = float(page_count - index)
-            results.append(
-                Result(
-                    id=result_id,
-                    title=title,
-                    sub_title=sub_title,
-                    icon=self._bookmark_icon(item),
-                    score=initial_score,
-                    actions=actions,
-                )
-            )
-
-        return QueryResponse(results=results)
+            ],
+        )
 
     async def _handle_selection_bookmark_search(
         self, ctx: Context, query: Query, search_text: str
@@ -686,31 +671,11 @@ class LinkdingPlugin(Plugin):
                 if action:
                     await action(ctx, action_ctx)
 
-        preview = WoxPreview(
-            preview_type=WoxPreviewType.LIST,
-            preview_data=WoxPreviewListData(items=[WoxPreviewListItem(
-                title="i18n:selection_searching", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-            )]).to_json(),
-        )
         return QueryResponse(
-            results=[Result(
-                id="selection:bookmarks",
-                title="i18n:selection_entry_title",
-                sub_title="i18n:selection_searching",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                preview=preview,
-                actions=[
-                    ResultAction(
-                        name="i18n:selection_action_expand", icon=WoxImage.new_svg(ACTION_SEARCH_SVG),
-                        is_default=True, prevent_hide_after_action=True, action=expand,
-                    ),
-                    ResultAction(
-                        name="i18n:action_open_in_linkding", icon=WoxImage.new_svg(ACTION_OPEN_SVG),
-                        action=self._create_open_url_action(
-                            f"{self.linkding_url}/bookmarks?q={urllib.parse.quote(search_text)}"
-                        ),
-                    ),
-                ],
+            results=[self._selection_entry(
+                "i18n:selection_searching",
+                [WoxPreviewListItem(title="i18n:selection_searching", icon=WoxImage.new_svg(LINKDING_ICON_SVG))],
+                self._selection_actions(search_text, expand),
             )],
             layout=QueryLayout(result_preview_width_ratio=0.6),
         )
@@ -722,25 +687,27 @@ class LinkdingPlugin(Plugin):
         try:
             try:
                 await self._clear_status(ctx)
-                response = await self._load_selection_bookmark_search(ctx, query, search_text)
+                resp_data = await self._load_bookmarks(search_text, self.max_results)
+                trigger_keyword = query.trigger_keyword or "ld"
+                if not query.trigger_keyword and self.api:
+                    # Resolve in the background so Enter needs no settings read.
+                    configured_keywords = json.loads(
+                        await self.api.get_setting(ctx, "TriggerKeywords") or "[]"
+                    )
+                    trigger_keyword = next((keyword for keyword in configured_keywords if keyword != "*"), "ld")
+                result = await self._selection_bookmark_result(
+                    ctx, search_text, trigger_keyword, resp_data.get("results", []),
+                )
             except Exception as e:
-                response = QueryResponse(results=[self._error_result(e, "i18n:selection_search_failed")])
-            if generation != self._query_generation:
-                return None
-            result = response.results[0]
-            if result.id.startswith("error:"):
+                error = self._error_result(e, "i18n:selection_search_failed")
                 status = (
-                    result.title if result.id in ("error:auth", "error:network", "error:timeout")
+                    error.title if error.id in ("error:auth", "error:network", "error:timeout")
                     else "i18n:selection_search_failed"
                 )
-                result.sub_title = status
-                result.preview = WoxPreview(
-                    preview_type=WoxPreviewType.LIST,
-                    preview_data=WoxPreviewListData(items=[WoxPreviewListItem(title=status)]).to_json(),
-                )
-            result.id = "selection:bookmarks"
-            result.title = "i18n:selection_entry_title"
-            self._prepare_favicons(ctx, response, generation, ready)
+                result = self._selection_entry(status, [WoxPreviewListItem(title=status)], [])
+            if generation != self._query_generation:
+                return None
+            self._prepare_favicons(ctx, [result], generation, ready)
             updated = await self._update_visible_result(ctx, UpdatableResult(
                 id=result.id, sub_title=result.sub_title, preview=result.preview,
                 actions=result.actions,
@@ -750,119 +717,59 @@ class LinkdingPlugin(Plugin):
             # Image updates must follow the initial preview update.
             ready.set()
 
-    async def _load_selection_bookmark_search(
-        self, ctx: Context, query: Query, search_text: str
-    ) -> QueryResponse:
-        layout = QueryLayout(result_preview_width_ratio=0.6)
-        encoded_q = urllib.parse.quote(search_text)
-        try:
-            resp_data = await self._load_bookmarks(search_text, self.max_results)
-        except Exception as e:
-            return QueryResponse(
-                results=[self._error_result(e, "i18n:selection_search_failed")],
-                layout=layout,
-            )
+    def _selection_entry(
+        self, subtitle: str, items: List[WoxPreviewListItem], actions: List[ResultAction],
+    ) -> Result:
+        return Result(
+            id="selection:bookmarks",
+            title="i18n:selection_entry_title",
+            sub_title=subtitle,
+            icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+            preview=WoxPreview(
+                preview_type=WoxPreviewType.LIST,
+                preview_data=WoxPreviewListData(items=items).to_json(),
+            ),
+            actions=actions,
+        )
 
-        raw_bookmarks: List[Dict[str, Any]] = resp_data.get("results", [])
-        web_search_url = f"{self.linkding_url}/bookmarks?q={encoded_q}"
-        trigger_keyword = query.trigger_keyword or "ld"
-        if not query.trigger_keyword and self.api:
-            # Resolve before returning the entry so Enter needs no settings read.
-            configured_keywords = json.loads(
-                await self.api.get_setting(ctx, "TriggerKeywords") or "[]"
-            )
-            trigger_keyword = next((keyword for keyword in configured_keywords if keyword != "*"), "ld")
-        actions = [
+    def _selection_actions(
+        self, search_text: str, expand: Callable[[Context, ActionContext], Awaitable[None]],
+    ) -> List[ResultAction]:
+        return [
             ResultAction(
-                name="i18n:selection_action_expand",
-                icon=WoxImage.new_svg(ACTION_SEARCH_SVG),
-                is_default=True,
-                prevent_hide_after_action=True,
-                action=self._create_change_query_action(trigger_keyword, search_text),
+                name="i18n:selection_action_expand", icon=WoxImage.new_svg(ACTION_SEARCH_SVG),
+                is_default=True, prevent_hide_after_action=True, action=expand,
             ),
             ResultAction(
-                name="i18n:action_open_in_linkding",
-                icon=WoxImage.new_svg(ACTION_OPEN_SVG),
-                is_default=False,
-                action=self._create_open_url_action(web_search_url),
+                name="i18n:action_open_in_linkding", icon=WoxImage.new_svg(ACTION_OPEN_SVG),
+                action=self._create_open_url_action(
+                    f"{self.linkding_url}/bookmarks?q={urllib.parse.quote(search_text)}"
+                ),
             ),
         ]
 
-        if not raw_bookmarks:
-            empty_item = WoxPreviewListItem(
+    async def _selection_bookmark_result(
+        self, ctx: Context, search_text: str, trigger_keyword: str, bookmarks: List[Dict[str, Any]],
+    ) -> Result:
+        actions = self._selection_actions(search_text, self._create_change_query_action(trigger_keyword, search_text))
+        if not bookmarks:
+            return self._selection_entry("i18n:selection_press_enter_to_edit", [WoxPreviewListItem(
+                title="i18n:no_bookmarks_found", subtitle="i18n:selection_press_enter_to_edit",
                 icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                title="i18n:no_bookmarks_found",
-                subtitle="i18n:selection_press_enter_to_edit",
+            )], actions)
+
+        items = [
+            WoxPreviewListItem(
+                icon=self._bookmark_icon(bookmark),
+                title=bookmark.get("title") or bookmark.get("website_title") or bookmark.get("url", ""),
+                subtitle=bookmark.get("url", ""),
+                tails=[ResultTail(type=ResultTailType.TEXT, text=f"#{tag}") for tag in bookmark.get("tag_names") or []],
             )
-            preview = WoxPreview(
-                preview_type=WoxPreviewType.LIST,
-                preview_data=WoxPreviewListData(items=[empty_item]).to_json(),
-            )
-            return QueryResponse(
-                results=[
-                    Result(
-                        id="bookmark:empty",
-                        title="i18n:no_bookmarks_found",
-                        sub_title="i18n:selection_press_enter_to_edit",
-                        icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                        preview=preview,
-                        actions=actions,
-                    )
-                ],
-                layout=layout,
-            )
-
-        preview_items: List[WoxPreviewListItem] = []
-        for bm in raw_bookmarks[: self.max_results]:
-            tails = [
-                ResultTail(type=ResultTailType.TEXT, text=f"#{t}")
-                for t in bm.get("tag_names", [])
-            ]
-            bm_title = bm.get("title") or bm.get("website_title") or bm.get("url") or ""
-            bm_url = bm.get("url", "")
-            preview_items.append(
-                WoxPreviewListItem(
-                    icon=self._bookmark_icon(bm),
-                    title=bm_title,
-                    subtitle=bm_url,
-                    tails=tails,
-                )
-            )
-
-        preview = WoxPreview(
-            preview_type=WoxPreviewType.LIST,
-            preview_data=WoxPreviewListData(items=preview_items).to_json(),
-        )
-
-        found_template = (
-            await self.api.get_translation(ctx, "selection_bookmarks_found")
-            if self.api
-            else "Linkding: {count} bookmarks found"
-        )
-        count = len(raw_bookmarks)
-        try:
-            title = found_template.format(count=count)
-        except Exception:
-            title = f"Linkding: {count} bookmarks found"
-
-        expand_hint = (
-            await self.api.get_translation(ctx, "selection_press_enter_to_expand")
-            if self.api else "Press Enter to select a bookmark"
-        )
-
-        return QueryResponse(
-            results=[
-                Result(
-                    id="selection:bookmarks",
-                    title=title,
-                    sub_title=f"{title} · {expand_hint}",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    preview=preview,
-                    actions=actions,
-                )
-            ],
-            layout=layout,
-        )
+            for bookmark in bookmarks[: self.max_results]
+        ]
+        found = await self._translate(ctx, "selection_bookmarks_found", count=len(bookmarks))
+        hint = await self._translate(ctx, "selection_press_enter_to_expand")
+        return self._selection_entry(f"{found} · {hint}", items, actions)
 
     async def _load_bookmarks(self, search_text: str, limit: int) -> Dict[str, Any]:
         search_text = search_text.strip()
@@ -900,6 +807,19 @@ class LinkdingPlugin(Plugin):
         return Result(
             id=f"error:{category}", title=title, sub_title=subtitle,
             icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+        )
+
+    async def _translate(self, ctx: Context, key: str, **values: Any) -> str:
+        template = await self.api.get_translation(ctx, key) if self.api else f"i18n:{key}"
+        return template.format(**values)
+
+    async def _url_preview(
+        self, ctx: Context, template_key: str, url: str, tags: List[str], title: str = "",
+    ) -> WoxPreview:
+        tags_md = " ".join(f"`#{tag}`" for tag in tags) if tags else await self._translate(ctx, "preview_no_tags")
+        return WoxPreview(
+            preview_type=WoxPreviewType.MARKDOWN,
+            preview_data=await self._translate(ctx, template_key, title=title, url=url, tags=tags_md),
         )
 
     def _create_open_url_action(self, target_url: str):
@@ -986,120 +906,35 @@ class LinkdingPlugin(Plugin):
 
         existing_bookmark = check_data.get("bookmark")
         if existing_bookmark:
-            existing_id = existing_bookmark.get("id")
-            result_id = f"bookmark:{existing_id}" if existing_id is not None else f"bookmark:{url}"
-            title = (
-                existing_bookmark.get("title")
-                or existing_bookmark.get("website_title")
-                or url
-            )
-            warning_text = (
-                await self.api.get_translation(ctx, "bookmark_already_exists")
-                if self.api
-                else "⚠️ Already bookmarked"
-            )
-            bm_tags = existing_bookmark.get("tag_names") or []
-            tags_str = " ".join(f"#{t}" for t in bm_tags)
-            if tags_str:
-                sub_title = f"{warning_text} · {url} · {tags_str}"
-            else:
-                sub_title = f"{warning_text} · {url}"
-
             web_search_url = f"{self.linkding_url}/bookmarks?q={urllib.parse.quote(url)}"
-            actions = [
-                ResultAction(
-                    name="i18n:action_open_url",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    is_default=True,
-                    action=self._create_open_url_action(url),
-                ),
-                ResultAction(
-                    name="i18n:action_copy_url",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    is_default=False,
-                    action=self._create_copy_url_action(url),
-                ),
-                ResultAction(
-                    name="i18n:action_open_in_linkding",
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    is_default=False,
-                    action=self._create_open_url_action(web_search_url),
-                ),
-            ]
-
-            preview = WoxPreview()
+            result = self._bookmark_result({**existing_bookmark, "url": url}, web_search_url)
+            warning = await self._translate(ctx, "bookmark_already_exists")
+            result.sub_title = f"{warning} · {result.sub_title}"
             if is_selection:
-                tags_md = " ".join(f"`#{t}`" for t in bm_tags) if bm_tags else "无"
-                md_content = (
-                    "### ⚠️ 该 URL 已收藏\n"
-                    f"- **标题**：{title}\n"
-                    f"- **网址**：`{url}`\n"
-                    f"- **已有标签**：{tags_md}"
+                result.preview = await self._url_preview(
+                    ctx, "preview_existing_bookmark", url, existing_bookmark.get("tag_names") or [], result.title,
                 )
-                preview = WoxPreview(
-                    preview_type=WoxPreviewType.MARKDOWN,
-                    preview_data=md_content,
-                )
-
-            return QueryResponse(
-                results=[
-                    Result(
-                        id=result_id,
-                        title=title,
-                        sub_title=sub_title,
-                        icon=self._bookmark_icon(existing_bookmark),
-                        preview=preview,
-                        actions=actions,
-                    )
+        else:
+            tags_str = " ".join(f"#{tag}" for tag in tags)
+            result = Result(
+                id=f"bookmark:save:{url}",
+                title="i18n:prompt_save_bookmark",
+                sub_title=f"{url} · {tags_str}" if tags_str else url,
+                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                actions=[
+                    ResultAction(
+                        name="i18n:action_save_bookmark", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        is_default=True, action=self._create_save_bookmark_action(url, tags),
+                    ),
+                    ResultAction(
+                        name="i18n:action_open_url", icon=WoxImage.new_svg(LINKDING_ICON_SVG),
+                        action=self._create_open_url_action(url),
+                    ),
                 ],
-                layout=layout,
             )
-
-        # Not bookmarked yet: show prompt to save
-        tags_str = " ".join(f"#{t}" for t in tags)
-        sub_title = f"{url} · {tags_str}" if tags_str else url
-        actions = [
-            ResultAction(
-                name="i18n:action_save_bookmark",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=True,
-                action=self._create_save_bookmark_action(url, tags),
-            ),
-            ResultAction(
-                name="i18n:action_open_url",
-                icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                is_default=False,
-                action=self._create_open_url_action(url),
-            ),
-        ]
-
-        preview = WoxPreview()
-        if is_selection:
-            tags_md = " ".join(f"`#{t}`" for t in tags) if tags else "无"
-            md_content = (
-                "### 🔖 保存书签至 Linkding\n"
-                f"- **目标网址**：`{url}`\n"
-                f"- **标签**：{tags_md}\n"
-                "> 按 Enter 立即保存，Linkding 将在后台自动抓取网页标题和描述"
-            )
-            preview = WoxPreview(
-                preview_type=WoxPreviewType.MARKDOWN,
-                preview_data=md_content,
-            )
-
-        return QueryResponse(
-            results=[
-                Result(
-                    id=f"bookmark:save:{url}",
-                    title="i18n:prompt_save_bookmark",
-                    sub_title=sub_title,
-                    icon=WoxImage.new_svg(LINKDING_ICON_SVG),
-                    preview=preview,
-                    actions=actions,
-                )
-            ],
-            layout=layout,
-        )
+            if is_selection:
+                result.preview = await self._url_preview(ctx, "preview_save_bookmark", url, tags)
+        return QueryResponse(results=[result], layout=layout)
 
     def _create_save_bookmark_action(self, target_url: str, tags: List[str]):
         async def _action(ctx: Context, action_ctx: ActionContext) -> None:
@@ -1191,12 +1026,7 @@ class LinkdingPlugin(Plugin):
         else:
             matching_tags = filtered_tags
 
-        tags_template = (
-            await self.api.get_translation(ctx, "toolbar_tags_found")
-            if self.api
-            else "{count} tags found"
-        )
-        await self._show_status(ctx, tags_template.format(count=len(matching_tags)))
+        await self._show_status(ctx, await self._translate(ctx, "toolbar_tags_found", count=len(matching_tags)))
 
         if not matching_tags:
             if not is_cooccurring and not tags:

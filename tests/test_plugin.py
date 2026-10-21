@@ -29,24 +29,8 @@ class MockPublicAPI:
         self.settings = initial_settings or {}
         self.setting_reads = []
         self.setting_changed_callbacks = []
-        self.translations = {
-            "prompt_empty_search": "Type to search bookmarks, or paste a URL to save...",
-            "bookmark_already_exists": "⚠️ Already bookmarked",
-            "prompt_save_bookmark": "Press Enter to save bookmark",
-            "action_save_bookmark": "Save Bookmark",
-            "notify_bookmark_created": "Bookmark saved successfully",
-            "notify_bookmark_failed": "Failed to save bookmark",
-            "no_tags_found": "No tags found",
-            "no_tags_found_sub": "No tags found in your Linkding instance",
-            "no_matching_tags": "No matching tags",
-            "tag_action_select": "Filter bookmarks by this tag",
-            "selection_bookmarks_found": "{count} bookmarks found",
-            "selection_press_enter_to_expand": "Press Enter to select a bookmark",
-            "selection_press_enter_to_edit": "No bookmarks found · Press Enter to edit search terms",
-            "selection_action_expand": "Expand Bookmark List",
-            "toolbar_tags_found": "{count} tags found",
-            "toolbar_bookmarks_found": "{count} bookmarks found",
-        }
+        plugin_file = Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py"
+        self.translations = extract_header_metadata(plugin_file)["I18n"]["en_US"].copy()
         self.copied_params = []
         self.notifications = []
         self.changed_queries = []
@@ -2471,7 +2455,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(response.layout)
             self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
             self.assertEqual(res.preview.preview_type, WoxPreviewType.MARKDOWN)
-            self.assertIn("### 🔖 保存书签至 Linkding", res.preview.preview_data)
+            self.assertIn("### 🔖 Save bookmark to Linkding", res.preview.preview_data)
             self.assertIn("https://woxlauncher.com", res.preview.preview_data)
 
             req = mock_urlopen.call_args[0][0]
@@ -2510,6 +2494,52 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             req = mock_urlopen.call_args[0][0]
             self.assertIn("/api/bookmarks/check/?url=https%3A%2F%2Fexample.com%2Fdocs", req.full_url)
 
+    async def test_selection_url_previews_follow_language(self):
+        from unittest.mock import MagicMock, patch
+
+        cases = [
+            ("en_US", False, [], (
+                "### 🔖 Save bookmark to Linkding\n"
+                "- **URL**: `https://example.com/docs`\n"
+                "- **Tags**: None\n"
+                "> Press Enter to save. Linkding will fetch the page title and description in the background."
+            )),
+            ("en_US", True, ["fav"], (
+                "### ⚠️ Already bookmarked\n"
+                "- **Title**: Existing Doc\n"
+                "- **URL**: `https://example.com/docs`\n"
+                "- **Existing tags**: `#fav`"
+            )),
+            ("zh_CN", False, ["fav"], (
+                "### 🔖 保存书签至 Linkding\n"
+                "- **目标网址**：`https://example.com/docs`\n"
+                "- **标签**：`#fav`\n"
+                "> 按 Enter 立即保存，Linkding 将在后台自动抓取网页标题和描述"
+            )),
+            ("zh_CN", True, [], (
+                "### ⚠️ 该 URL 已收藏\n"
+                "- **标题**：Existing Doc\n"
+                "- **网址**：`https://example.com/docs`\n"
+                "- **已有标签**：无"
+            )),
+        ]
+        metadata = extract_header_metadata(Path(__file__).resolve().parent.parent / "Wox.Plugin.Linkding.py")
+        for language, existing, tags, expected in cases:
+            with self.subTest(language=language, existing=existing):
+                self.mock_api.translations = metadata["I18n"][language].copy()
+                bookmark = {"id": 10, "website_title": "Existing Doc", "tag_names": tags} if existing else None
+                response = MagicMock()
+                response.read.return_value = json.dumps({"bookmark": bookmark}).encode("utf-8")
+                response.__enter__.return_value = response
+                text = "https://example.com/docs" + (" #fav" if tags else "")
+                with patch("urllib.request.urlopen", return_value=response):
+                    result = (await self.plugin.query(self.ctx, self._make_selection_query(
+                        Selection(type=SelectionType.TEXT, text=text),
+                    ))).results[0]
+                self.assertEqual(result.preview.preview_type, WoxPreviewType.MARKDOWN)
+                self.assertEqual(result.preview.preview_data, expected)
+                self.assertEqual(result.title, "Existing Doc" if existing else "i18n:prompt_save_bookmark")
+
     async def test_selection_query_existing_url(self):
         from unittest.mock import MagicMock, patch
 
@@ -2539,7 +2569,7 @@ class TestSelectionQuery(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(response.layout)
             self.assertEqual(response.layout.result_preview_width_ratio, 0.6)
             self.assertEqual(res.preview.preview_type, WoxPreviewType.MARKDOWN)
-            self.assertIn("### ⚠️ 该 URL 已收藏", res.preview.preview_data)
+            self.assertIn("### ⚠️ Already bookmarked", res.preview.preview_data)
             self.assertIn("Existing Doc", res.preview.preview_data)
             self.assertIn("#fav", res.preview.preview_data)
 
