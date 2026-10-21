@@ -30,31 +30,13 @@
 
 - 🔍 **即时书签搜索**
   - 输入 `ld <关键字>` 即可全文检索书签的标题、描述与网址。
-- 🖼️ **网站图标（favicon）**
-  - 普通搜索、标签过滤结果、划词预览和重复书签检测均显示 Linkding 保存的网站图标。
-  - 先立即展示书签和默认 Linkding 图标，再在后台加载 favicon 并原位替换；图标缺失、下载失败或返回非图片内容时保留 Linkding 图标。
-  - 下载结果（包括失败）在内存中缓存 300 秒；修改 Linkding 地址或 API Token 后清空缓存。
-  - 图片解码由 Wox 处理；下载成功但文件内容损坏时，仍可能显示 Wox 的通用占位图。
-- ⚡ **多动作交互支持**
-  - **默认动作（回车）**：在系统默认浏览器中直接打开书签。
-  - **复制链接**：一键将书签 URL 拷贝至系统剪贴板。
-  - **在 Linkding 中打开**：快速跳转至 Linkding Web 端对应的搜索页面。
-- 🏷️ **交互式标签浏览与检索（Tag Browsing）**
+- 🏷️ **标签浏览与检索**
   - 输入 `ld #` 列出所有标签；输入 `ld #<前缀>`（如 `ld #dev`）实时进行不区分大小写的前缀过滤。
-  - 内置标签内存缓存与 300 秒 TTL 惰性刷新机制，浏览体验如丝般顺滑。
-  - 选中标签回车自动将输入更新为 `ld #<tag> `（附带末尾空格），立即展示该标签下的所有书签。
-- ➕ **智能收藏与重复检测（Smart Bookmark Creation）**
-  - **智能模式识别**，直接输入或粘贴 URL（如 `ld https://...` 或 `ld woxlauncher.com`）自动进入添加模式，无需记忆或输入任何子命令。针对浏览器地址栏复制出的无协议网址自动进行规范化与协议补全（localhost/127.0.0.1 补全 `http://`，其他域名/IP 补全 `https://`）。
-  - 自动调用 Linkding `/check` 接口检测是否已收藏；若已收藏则展示预警提示，防止重复添加。
+- ➕ **智能收藏**
+  - 直接输入或粘贴 URL（如 `ld https://...` 或 `ld woxlauncher.com`）自动进入添加模式。
   - 支持快捷追加标签：`ld woxlauncher.com #tech #dev` 自动提取空格分隔的 `#tag` 并为书签打标。
-  - 触发 Linkding 服务端自动刮削（Scrape）网页标题和描述。
 - 📌 **支持 Selection Query 选区查询**
-  - 在任何应用或浏览器中选中文本或链接，按下 Wox 选区查询快捷键（如 `Win+Alt+Space`）直接与 Linkding 联动：识别为网址则展示查重与快捷保存，普通文本则直接在 Linkding 中搜索。
-  - 关键字搜索立即显示固定的“Linkding 书签”入口，后台查询完成后原位更新状态与只读预览。按回车使用配置的触发关键词展开（默认 `ld <关键字>`），在 Wox 内选择书签；加载中提前回车会复用正在进行的查询，只有一条匹配时也先展开，无匹配时可修改搜索词。`Ctrl+J` 中保留在 Linkding 网页搜索的次要操作。
-- 🌐 **双语支持（i18n）**
-  - 内置中英双语国际化，根据 Wox 系统偏好自动切换显示。
-- 🛡️ **声明式配置检验**
-  - 采用 Wox 声明式 `QueryRequirements`，首次使用时若未配置服务端地址或 Token，Wox 会直接提示填写，防止运行时静默失败。
+  - 选中文本或链接，按下 Wox 选区查询快捷键与本插件联动：识别为网址则展示查重与快捷保存，普通文本则直接在 Linkding 中搜索。
 
 ---
 
@@ -82,8 +64,7 @@
 | :--- | :--- | :--- |
 | **基础搜索** | `ld python` | 搜索包含 "python" 的书签，展示标题、网址与关联标签 |
 | **浏览全部标签** | `ld #` | 展示所有可用标签 |
-| **前缀筛选标签** | `ld #dev` | 过滤以 "dev" 开头的标签，回车自动填充 `ld #dev ` |
-| **按标签过滤书签** | `ld #dev ` | 展示所有包含 `dev` 标签的书签 |
+| **前缀筛选标签** | `ld #dev` | 过滤以 "dev" 开头的标签，选中回车自动填充  |
 | **标签 + 关键字搜索**| `ld #dev fastapi` | 检索带有 `dev` 标签且包含 "fastapi" 的书签 |
 | **快速添加书签** | `ld https://news.ycombinator.com` | 检测是否已存在，按回车快速添加 |
 | **带标签添加书签** | `ld https://github.com #dev #git` | 添加书签并自动绑定 `dev` 和 `git` 两个标签 |
@@ -117,16 +98,6 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```bash
 python -m mypy Wox.Plugin.Linkding.py tests/test_plugin.py
 ```
-
----
-
-## 📂 项目结构与架构决策
-
-- `Wox.Plugin.Linkding.py`: 包含插件元数据、配置声明、国际化与完整业务逻辑的单文件插件。
-- `tests/test_plugin.py`: 完整的行为驱动单元测试，模拟 Wox 运行环境与 Linkding HTTP 响应。
-- [CONTEXT.md](CONTEXT.md): 项目核心领域概念与专用术语表。
-- [docs/adr/0001-single-file-python-plugin.md](docs/adr/0001-single-file-python-plugin.md): 采用单文件 Python SDK 架构决策。
-- [docs/adr/0002-smart-input-recognition.md](docs/adr/0002-smart-input-recognition.md): 采用智能输入模式识别替代显式子命令决策。
 
 ---
 
