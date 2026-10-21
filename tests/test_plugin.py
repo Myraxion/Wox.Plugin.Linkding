@@ -847,6 +847,38 @@ class TestBookmarkFavicons(unittest.IsolatedAsyncioTestCase):
         preview = json.loads(api.result_updates[1].preview.preview_data)
         self.assertEqual(preview["items"][0]["icon"]["ImageType"], "base64")
 
+    async def test_failed_selection_content_stops_icons_and_pending_expansion(self):
+        from unittest.mock import patch
+        from wox_plugin import ActionContext
+
+        for disconnected in (False, True):
+            with self.subTest(disconnected=disconnected):
+                class RejectContentAPI(MockPublicAPI):
+                    async def update_result(self, ctx, result):
+                        if result.sub_title is not None:
+                            self.content_attempts += 1
+                            if disconnected:
+                                raise ConnectionError("host disconnected")
+                            return False
+                        self.icon_attempts += 1
+                        return await super().update_result(ctx, result)
+
+                api = RejectContentAPI(self.api.settings)
+                api.content_attempts = 0
+                api.icon_attempts = 0
+                await self.plugin.init(self.ctx, PluginInitParams(api=api, plugin_directory=str(Path.cwd())))
+                self.bookmarks[0]["favicon_url"] = f"https://linkding.example.com/static/rejected-{disconnected}.png"
+
+                with patch("urllib.request.urlopen", side_effect=self._urlopen):
+                    response = await self.plugin.query(self.ctx, self._query(str(disconnected), selection=True))
+                    await response.results[0].actions[0].action(self.ctx, ActionContext())
+                    await self._finish_images()
+
+                self.assertEqual(api.content_attempts, 1 if disconnected else 5)
+                self.assertEqual(api.icon_attempts, 0)
+                self.assertEqual(api.result_updates, [])
+                self.assertEqual(api.changed_queries, [])
+
     async def test_selection_settings_change_discards_pending_icon_update(self):
         from unittest.mock import patch
 
